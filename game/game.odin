@@ -2,14 +2,14 @@ package game
 
 import "../wassily"
 
+t := 0
+
 loop :: proc() 
 {
     w, h := wassily.size()
-    // wassily.fillCircle(w/2, h/2, 100, 200, 255, 0)
+    wassily.fillCircle(w/2 + t, h/2, 100, 200, 255, 0)
 
-    verts: [dynamic]wassily.Vertex
-    wassily.drawCircle(0, 0, 0.5, {1, 0, 0}, 64, &verts)
-    wassily.create_vertex_buffer(verts[:])
+    t = t+1
 }
 
 main :: proc() 

@@ -82,9 +82,15 @@ g_image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
 g_render_finished_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
 g_in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence
 
-g_vertex_buffer: vk.Buffer
-g_vertex_buffer_memory: vk.DeviceMemory
-g_vertex_count: u32
+MAX_VERTICES :: 1 << 16
+
+// One buffer per frame in flight so the CPU never writes a buffer the GPU is still reading.
+g_vertex_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer
+g_vertex_buffer_memories: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory
+g_vertex_buffer_mapped: [MAX_FRAMES_IN_FLIGHT][^]Vertex
+g_vertex_counts: [MAX_FRAMES_IN_FLIGHT]u32
+
+g_vertices: [dynamic]Vertex
 
 // KHR_PORTABILITY_SUBSET_EXTENSION_NAME :: "VK_KHR_portability_subset"
 
@@ -276,14 +282,7 @@ choose_swapchain_surface_format :: proc(formats: []vk.SurfaceFormatKHR) -> vk.Su
 }
 
 choose_swapchain_present_mode :: proc(modes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
-	// We would like mailbox for the best tradeoff between tearing and latency.
-	for mode in modes {
-		if mode == .MAILBOX {
-			return .MAILBOX
-		}
-	}
-
-	// As a fallback, fifo (basically vsync) is always available.
+	// FIFO (vsync) caps loopfn to the display rate, so per-frame animation runs at a steady speed.
 	return .FIFO
 }
 
@@ -475,7 +474,7 @@ create_shader_module :: proc(code: []byte) -> (module: vk.ShaderModule) {
 	return
 }
 
-record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32) {
+record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32, frame: int) {
 	begin_info := vk.CommandBufferBeginInfo {
 		sType = .COMMAND_BUFFER_BEGIN_INFO,
 	}
@@ -508,9 +507,9 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	}
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
-    offset: vk.DeviceSize = 0
-    vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_vertex_buffer, &offset)
-    vk.CmdDraw(command_buffer, g_vertex_count, 1, 0, 0)
+	offset: vk.DeviceSize = 0
+	vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_vertex_buffers[frame], &offset)
+	vk.CmdDraw(command_buffer, g_vertex_counts[frame], 1, 0, 0)
 
 	vk.CmdEndRenderPass(command_buffer)
 
@@ -539,35 +538,48 @@ find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -
     log.panic("vulkan: no suitable memory type")
 }
 
-create_vertex_buffer :: proc(vertices: []Vertex) {
-    size := vk.DeviceSize(len(vertices) * size_of(Vertex))
+create_vertex_buffers :: proc() {
+	size := vk.DeviceSize(MAX_VERTICES * size_of(Vertex))
 
-    buffer_info := vk.BufferCreateInfo {
-        sType       = .BUFFER_CREATE_INFO,
-        size        = size,
-        usage       = {.VERTEX_BUFFER},
-        sharingMode = .EXCLUSIVE,
-    }
-    must(vk.CreateBuffer(g_device, &buffer_info, nil, &g_vertex_buffer))
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		buffer_info := vk.BufferCreateInfo {
+			sType       = .BUFFER_CREATE_INFO,
+			size        = size,
+			usage       = {.VERTEX_BUFFER},
+			sharingMode = .EXCLUSIVE,
+		}
+		must(vk.CreateBuffer(g_device, &buffer_info, nil, &g_vertex_buffers[i]))
 
-    reqs: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(g_device, g_vertex_buffer, &reqs)
+		reqs: vk.MemoryRequirements
+		vk.GetBufferMemoryRequirements(g_device, g_vertex_buffers[i], &reqs)
 
-    alloc_info := vk.MemoryAllocateInfo {
-        sType           = .MEMORY_ALLOCATE_INFO,
-        allocationSize  = reqs.size,
-        memoryTypeIndex = find_memory_type(
-            reqs.memoryTypeBits,
-            {.HOST_VISIBLE, .HOST_COHERENT},
-        ),
-    }
-    must(vk.AllocateMemory(g_device, &alloc_info, nil, &g_vertex_buffer_memory))
-    must(vk.BindBufferMemory(g_device, g_vertex_buffer, g_vertex_buffer_memory, 0))
+		alloc_info := vk.MemoryAllocateInfo {
+			sType           = .MEMORY_ALLOCATE_INFO,
+			allocationSize  = reqs.size,
+			memoryTypeIndex = find_memory_type(reqs.memoryTypeBits, {.HOST_VISIBLE, .HOST_COHERENT}),
+		}
+		must(vk.AllocateMemory(g_device, &alloc_info, nil, &g_vertex_buffer_memories[i]))
+		must(vk.BindBufferMemory(g_device, g_vertex_buffers[i], g_vertex_buffer_memories[i], 0))
 
-    data: rawptr
-    must(vk.MapMemory(g_device, g_vertex_buffer_memory, 0, size, {}, &data))
-    runtime.mem_copy(data, raw_data(vertices), int(size))
-    vk.UnmapMemory(g_device, g_vertex_buffer_memory)
+		data: rawptr
+		must(vk.MapMemory(g_device, g_vertex_buffer_memories[i], 0, size, {}, &data))
+		g_vertex_buffer_mapped[i] = cast([^]Vertex)data
+	}
+}
 
-    g_vertex_count = u32(len(vertices))
+destroy_vertex_buffers :: proc() {
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		vk.UnmapMemory(g_device, g_vertex_buffer_memories[i])
+		vk.DestroyBuffer(g_device, g_vertex_buffers[i], nil)
+		vk.FreeMemory(g_device, g_vertex_buffer_memories[i], nil)
+	}
+}
+
+upload_vertices :: proc(frame: int) {
+	count := min(len(g_vertices), MAX_VERTICES)
+	if count < len(g_vertices) {
+		log.warnf("wassily: %v vertices exceeds MAX_VERTICES, truncating", len(g_vertices))
+	}
+	runtime.mem_copy(g_vertex_buffer_mapped[frame], raw_data(g_vertices), count * size_of(Vertex))
+	g_vertex_counts[frame] = u32(count)
 }

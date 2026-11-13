@@ -24,22 +24,27 @@ hello :: proc()
 
 size :: proc() -> (int, int)
 {
-    return 256, 256
+    return WIDTH, HEIGHT
 }
 
-drawCircle :: proc(
-    cx, cy, radius: f32,
-    color: [3]f32,
-    segments: int,
-    out: ^[dynamic]Vertex,
-) {
-    for i in 0 ..< segments {
-        a0 := f32(i)   / f32(segments) * 2 * math.PI
-        a1 := f32(i+1) / f32(segments) * 2 * math.PI
+CIRCLE_SEGMENTS :: 64
 
-        append(out, Vertex{{cx, cy}, color})
-        append(out, Vertex{{cx + radius * math.cos(a0), cy + radius * math.sin(a0)}, color})
-        append(out, Vertex{{cx + radius * math.cos(a1), cy + radius * math.sin(a1)}, color})
+// Coordinates are pixels in a WIDTH x HEIGHT canvas, origin top-left; colors are 0-255.
+fillCircle :: proc(x: int, y: int, radius: int, colorR : int, colorG : int, colorB : int)
+{
+    cx := f32(x) / WIDTH  * 2 - 1
+    cy := f32(y) / HEIGHT * 2 - 1
+    rx := f32(radius) / WIDTH  * 2
+    ry := f32(radius) / HEIGHT * 2
+    color := [3]f32{f32(colorR), f32(colorG), f32(colorB)} / 255
+
+    for i in 0 ..< CIRCLE_SEGMENTS {
+        a0 := f32(i)   / CIRCLE_SEGMENTS * 2 * math.PI
+        a1 := f32(i+1) / CIRCLE_SEGMENTS * 2 * math.PI
+
+        append(&g_vertices, Vertex{{cx, cy}, color})
+        append(&g_vertices, Vertex{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, color})
+        append(&g_vertices, Vertex{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, color})
     }
 }
 
@@ -380,7 +385,9 @@ run :: proc(loopfn : proc())
 	defer for sem in g_render_finished_semaphores {vk.DestroySemaphore(g_device, sem, nil)}
 	defer for fence in g_in_flight_fences {vk.DestroyFence(g_device, fence, nil)}
 
-	loopfn()
+	create_vertex_buffers()
+	defer destroy_vertex_buffers()
+	defer delete(g_vertices)
 
 	current_frame := 0
 	for !glfw.WindowShouldClose(g_window) {
@@ -412,8 +419,12 @@ run :: proc(loopfn : proc())
 
 		must(vk.ResetFences(g_device, 1, &g_in_flight_fences[current_frame]))
 
+		clear(&g_vertices)
+		loopfn()
+		upload_vertices(current_frame)
+
 		must(vk.ResetCommandBuffer(g_command_buffers[current_frame], {}))
-		record_command_buffer(g_command_buffers[current_frame], image_index)
+		record_command_buffer(g_command_buffers[current_frame], image_index, current_frame)
 
 		// Submit.
 		submit_info := vk.SubmitInfo {
