@@ -1,7 +1,7 @@
 package wassily
 
-WIDTH  	:: 256
-HEIGHT 	:: 256
+WIDTH  	:: 1920
+HEIGHT 	:: 1080
 TITLE 	:: "wassily"
 
 import "core:fmt"
