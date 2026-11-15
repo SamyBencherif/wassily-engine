@@ -4,4 +4,4 @@ main:
 	glslc wassily/shader.frag -o wassily/frag.spv
 	
 	# run program
-	odin run game
+	odin run src

@@ -12,8 +12,13 @@ import "core:log"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
-Vertex :: struct {
+Vertex2D :: struct {
 	position: [2]f32,
+	color: [3]f32
+}
+
+Vertex3D :: struct {
+	position: [3]f32,
 	color: [3]f32
 }
 
@@ -25,6 +30,11 @@ hello :: proc()
 size :: proc() -> (int, int)
 {
     return WIDTH, HEIGHT
+}
+
+time :: proc() -> f64
+{
+	return glfw.GetTime()
 }
 
 CIRCLE_SEGMENTS :: 64
