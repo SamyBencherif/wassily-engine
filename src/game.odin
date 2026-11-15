@@ -5,21 +5,33 @@ import "core:math"
 
 mesh : wassily.Mesh
 tex: wassily.Texture
+camPos : wassily.Vector3
 
 init :: proc()
 {
     mesh = wassily.loadMesh("assets/cube.obj")
     tex  = wassily.loadTexture("assets/brick.jpg")
+
+    camPos = wassily.Vector3{0, 0, -10}
 }
 
 loop :: proc() 
 {
     w, h := wassily.size()
 
-    camPos := wassily.Vector3{0, 0, -10}
     camTarget := wassily.Vector3{0, 0, 0}
     camUp := wassily.Vector3{0, 1, 0}
     camFov : f64 = 60
+
+    if wassily.is_down(wassily.KEY_W)
+    {
+        camPos += wassily.Vector3{0, 0, 1}
+    }
+
+    if wassily.is_down(wassily.KEY_S)
+    {
+        camPos += wassily.Vector3{0, 0, -1}
+    }
 
     wassily.camera(camPos, camTarget, camUp, camFov)
 
