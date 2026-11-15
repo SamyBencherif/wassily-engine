@@ -25,6 +25,7 @@ package wassily
 import "base:runtime"
 
 import "core:log"
+import "core:math/linalg"
 import "core:slice"
 import "core:strings"
 
@@ -41,6 +42,9 @@ when ODIN_OS == .Darwin {
 
 SHADER_VERT :: #load("vert.spv")
 SHADER_FRAG :: #load("frag.spv")
+SHADER_MESH_VERT :: #load("mesh_vert.spv")
+SHADER_MESH_FRAG :: #load("mesh_frag.spv")
+SHADER_LINE_VERT :: #load("line_vert.spv")
 
 // Enables Vulkan debug logging and validation layers.
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
@@ -67,13 +71,22 @@ g_swapchain_format: vk.SurfaceFormatKHR
 g_swapchain_extent: vk.Extent2D
 g_swapchain_frame_buffers: []vk.Framebuffer
 
-g_vert_shader_module: vk.ShaderModule
-g_frag_shader_module: vk.ShaderModule
-g_shader_stages: [2]vk.PipelineShaderStageCreateInfo
+g_depth_format: vk.Format
+g_depth_image: vk.Image
+g_depth_memory: vk.DeviceMemory
+g_depth_view: vk.ImageView
 
 g_render_pass: vk.RenderPass
 g_pipeline_layout: vk.PipelineLayout
 g_pipeline: vk.Pipeline
+g_mesh_pipeline_layout: vk.PipelineLayout
+g_mesh_pipeline: vk.Pipeline
+g_line_pipeline_layout: vk.PipelineLayout
+g_line_pipeline: vk.Pipeline
+
+g_descriptor_set_layout: vk.DescriptorSetLayout
+g_descriptor_pool: vk.DescriptorPool
+g_sampler: vk.Sampler
 
 g_command_pool: vk.CommandPool
 g_command_buffers: [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer
@@ -85,12 +98,15 @@ g_in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence
 MAX_VERTICES :: 1 << 16
 
 // One buffer per frame in flight so the CPU never writes a buffer the GPU is still reading.
-g_vertex_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer
-g_vertex_buffer_memories: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory
-g_vertex_buffer_mapped: [MAX_FRAMES_IN_FLIGHT][^]Vertex
-g_vertex_counts: [MAX_FRAMES_IN_FLIGHT]u32
+Vertex_Stream :: struct {
+	buffers:  [MAX_FRAMES_IN_FLIGHT]vk.Buffer,
+	memories: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory,
+	mapped:   [MAX_FRAMES_IN_FLIGHT]rawptr,
+	counts:   [MAX_FRAMES_IN_FLIGHT]u32,
+}
 
-g_vertices: [dynamic]Vertex
+g_vertex_stream: Vertex_Stream
+g_vertices: [dynamic]Vertex2D
 
 // KHR_PORTABILITY_SUBSET_EXTENSION_NAME :: "VK_KHR_portability_subset"
 
@@ -424,12 +440,12 @@ destroy_swapchain :: proc() {
 create_framebuffers :: proc() {
 	g_swapchain_frame_buffers = make([]vk.Framebuffer, len(g_swapchain_views))
 	for view, i in g_swapchain_views {
-		attachments := []vk.ImageView{view}
+		attachments := []vk.ImageView{view, g_depth_view}
 
 		frame_buffer := vk.FramebufferCreateInfo {
 			sType           = .FRAMEBUFFER_CREATE_INFO,
 			renderPass      = g_render_pass,
-			attachmentCount = 1,
+			attachmentCount = u32(len(attachments)),
 			pAttachments    = raw_data(attachments),
 			width           = g_swapchain_extent.width,
 			height          = g_swapchain_extent.height,
@@ -456,9 +472,11 @@ recreate_swapchain :: proc() {
 	vk.DeviceWaitIdle(g_device)
 
 	destroy_framebuffers()
+	destroy_depth_resources()
 	destroy_swapchain()
 
 	create_swapchain()
+	create_depth_resources()
 	create_framebuffers()
 }
 
@@ -480,20 +498,19 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	}
 	must(vk.BeginCommandBuffer(command_buffer, &begin_info))
 
-	clear_color := vk.ClearValue{}
-	clear_color.color.float32 = {0.0, 0.0, 0.0, 1.0}
+	clear_values: [2]vk.ClearValue
+	clear_values[0].color.float32 = {0.0, 0.0, 0.0, 1.0}
+	clear_values[1].depthStencil = {depth = 1.0}
 
 	render_pass_info := vk.RenderPassBeginInfo {
 		sType = .RENDER_PASS_BEGIN_INFO,
 		renderPass = g_render_pass,
 		framebuffer = g_swapchain_frame_buffers[image_index],
 		renderArea = {extent = g_swapchain_extent},
-		clearValueCount = 1,
-		pClearValues = &clear_color,
+		clearValueCount = len(clear_values),
+		pClearValues = &clear_values[0],
 	}
 	vk.CmdBeginRenderPass(command_buffer, &render_pass_info, .INLINE)
-
-	vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_pipeline)
 
 	viewport := vk.Viewport {
 		width    = f32(g_swapchain_extent.width),
@@ -508,8 +525,34 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
 	offset: vk.DeviceSize = 0
-	vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_vertex_buffers[frame], &offset)
-	vk.CmdDraw(command_buffer, g_vertex_counts[frame], 1, 0, 0)
+	view_proj := camera_view_proj(f64(g_swapchain_extent.width) / f64(g_swapchain_extent.height))
+
+	if len(g_mesh_draws) > 0 {
+		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_mesh_pipeline)
+		for &draw in g_mesh_draws {
+			mvp := linalg.matrix_cast(view_proj * draw.model, f32)
+			vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(mvp), &mvp)
+			vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 0, 1, &draw.texture.descriptor_set, 0, nil)
+			vk.CmdBindVertexBuffers(command_buffer, 0, 1, &draw.mesh.vertex_buffer, &offset)
+			vk.CmdBindIndexBuffer(command_buffer, draw.mesh.index_buffer, 0, .UINT32)
+			vk.CmdDrawIndexed(command_buffer, draw.mesh.index_count, 1, 0, 0, 0)
+		}
+	}
+
+	if g_line_stream.counts[frame] > 0 {
+		vp := linalg.matrix_cast(view_proj, f32)
+		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_line_pipeline)
+		vk.CmdPushConstants(command_buffer, g_line_pipeline_layout, {.VERTEX}, 0, size_of(vp), &vp)
+		vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_line_stream.buffers[frame], &offset)
+		vk.CmdDraw(command_buffer, g_line_stream.counts[frame], 1, 0, 0)
+	}
+
+	// 2D last, with depth testing off, so it overlays the 3D scene.
+	if g_vertex_stream.counts[frame] > 0 {
+		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_pipeline)
+		vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_vertex_stream.buffers[frame], &offset)
+		vk.CmdDraw(command_buffer, g_vertex_stream.counts[frame], 1, 0, 0)
+	}
 
 	vk.CmdEndRenderPass(command_buffer)
 
@@ -538,48 +581,394 @@ find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -
     log.panic("vulkan: no suitable memory type")
 }
 
-create_vertex_buffers :: proc() {
-	size := vk.DeviceSize(MAX_VERTICES * size_of(Vertex))
+create_buffer :: proc(
+	size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+	properties: vk.MemoryPropertyFlags,
+) -> (
+	buffer: vk.Buffer,
+	memory: vk.DeviceMemory,
+) {
+	buffer_info := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = size,
+		usage       = usage,
+		sharingMode = .EXCLUSIVE,
+	}
+	must(vk.CreateBuffer(g_device, &buffer_info, nil, &buffer))
+
+	reqs: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(g_device, buffer, &reqs)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = reqs.size,
+		memoryTypeIndex = find_memory_type(reqs.memoryTypeBits, properties),
+	}
+	must(vk.AllocateMemory(g_device, &alloc_info, nil, &memory))
+	must(vk.BindBufferMemory(g_device, buffer, memory, 0))
+	return
+}
+
+create_staging_buffer :: proc(data: []byte) -> (buffer: vk.Buffer, memory: vk.DeviceMemory) {
+	size := vk.DeviceSize(len(data))
+	buffer, memory = create_buffer(size, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT})
+
+	mapped: rawptr
+	must(vk.MapMemory(g_device, memory, 0, size, {}, &mapped))
+	runtime.mem_copy(mapped, raw_data(data), len(data))
+	vk.UnmapMemory(g_device, memory)
+	return
+}
+
+// Uploads data once into fast GPU-only memory via a staging buffer.
+create_device_local_buffer :: proc(
+	data: []byte,
+	usage: vk.BufferUsageFlags,
+) -> (
+	buffer: vk.Buffer,
+	memory: vk.DeviceMemory,
+) {
+	staging, staging_memory := create_staging_buffer(data)
+	defer vk.DestroyBuffer(g_device, staging, nil)
+	defer vk.FreeMemory(g_device, staging_memory, nil)
+
+	buffer, memory = create_buffer(vk.DeviceSize(len(data)), usage + {.TRANSFER_DST}, {.DEVICE_LOCAL})
+
+	cmd := begin_one_time_commands()
+	region := vk.BufferCopy{size = vk.DeviceSize(len(data))}
+	vk.CmdCopyBuffer(cmd, staging, buffer, 1, &region)
+	end_one_time_commands(cmd)
+	return
+}
+
+begin_one_time_commands :: proc() -> (cmd: vk.CommandBuffer) {
+	alloc_info := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool        = g_command_pool,
+		level              = .PRIMARY,
+		commandBufferCount = 1,
+	}
+	must(vk.AllocateCommandBuffers(g_device, &alloc_info, &cmd))
+
+	begin_info := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+		flags = {.ONE_TIME_SUBMIT},
+	}
+	must(vk.BeginCommandBuffer(cmd, &begin_info))
+	return
+}
+
+end_one_time_commands :: proc(cmd: vk.CommandBuffer) {
+	cmd := cmd
+	must(vk.EndCommandBuffer(cmd))
+
+	submit_info := vk.SubmitInfo {
+		sType              = .SUBMIT_INFO,
+		commandBufferCount = 1,
+		pCommandBuffers    = &cmd,
+	}
+	must(vk.QueueSubmit(g_graphics_queue, 1, &submit_info, 0))
+	must(vk.QueueWaitIdle(g_graphics_queue))
+	vk.FreeCommandBuffers(g_device, g_command_pool, 1, &cmd)
+}
+
+create_image :: proc(
+	width, height: u32,
+	format: vk.Format,
+	usage: vk.ImageUsageFlags,
+) -> (
+	image: vk.Image,
+	memory: vk.DeviceMemory,
+) {
+	image_info := vk.ImageCreateInfo {
+		sType         = .IMAGE_CREATE_INFO,
+		imageType     = .D2,
+		format        = format,
+		extent        = {width, height, 1},
+		mipLevels     = 1,
+		arrayLayers   = 1,
+		samples       = {._1},
+		tiling        = .OPTIMAL,
+		usage         = usage,
+		sharingMode   = .EXCLUSIVE,
+		initialLayout = .UNDEFINED,
+	}
+	must(vk.CreateImage(g_device, &image_info, nil, &image))
+
+	reqs: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(g_device, image, &reqs)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = reqs.size,
+		memoryTypeIndex = find_memory_type(reqs.memoryTypeBits, {.DEVICE_LOCAL}),
+	}
+	must(vk.AllocateMemory(g_device, &alloc_info, nil, &memory))
+	must(vk.BindImageMemory(g_device, image, memory, 0))
+	return
+}
+
+create_image_view :: proc(image: vk.Image, format: vk.Format, aspect: vk.ImageAspectFlags) -> (view: vk.ImageView) {
+	create_info := vk.ImageViewCreateInfo {
+		sType            = .IMAGE_VIEW_CREATE_INFO,
+		image            = image,
+		viewType         = .D2,
+		format           = format,
+		subresourceRange = {aspectMask = aspect, levelCount = 1, layerCount = 1},
+	}
+	must(vk.CreateImageView(g_device, &create_info, nil, &view))
+	return
+}
+
+upload_texture_pixels :: proc(image: vk.Image, width, height: u32, pixels: []byte) {
+	staging, staging_memory := create_staging_buffer(pixels)
+	defer vk.DestroyBuffer(g_device, staging, nil)
+	defer vk.FreeMemory(g_device, staging_memory, nil)
+
+	cmd := begin_one_time_commands()
+
+	range := vk.ImageSubresourceRange{aspectMask = {.COLOR}, levelCount = 1, layerCount = 1}
+
+	to_transfer := vk.ImageMemoryBarrier {
+		sType               = .IMAGE_MEMORY_BARRIER,
+		oldLayout           = .UNDEFINED,
+		newLayout           = .TRANSFER_DST_OPTIMAL,
+		srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		image               = image,
+		subresourceRange    = range,
+		dstAccessMask       = {.TRANSFER_WRITE},
+	}
+	vk.CmdPipelineBarrier(cmd, {.TOP_OF_PIPE}, {.TRANSFER}, {}, 0, nil, 0, nil, 1, &to_transfer)
+
+	region := vk.BufferImageCopy {
+		imageSubresource = {aspectMask = {.COLOR}, layerCount = 1},
+		imageExtent      = {width, height, 1},
+	}
+	vk.CmdCopyBufferToImage(cmd, staging, image, .TRANSFER_DST_OPTIMAL, 1, &region)
+
+	to_shader := to_transfer
+	to_shader.oldLayout = .TRANSFER_DST_OPTIMAL
+	to_shader.newLayout = .SHADER_READ_ONLY_OPTIMAL
+	to_shader.srcAccessMask = {.TRANSFER_WRITE}
+	to_shader.dstAccessMask = {.SHADER_READ}
+	vk.CmdPipelineBarrier(cmd, {.TRANSFER}, {.FRAGMENT_SHADER}, {}, 0, nil, 0, nil, 1, &to_shader)
+
+	end_one_time_commands(cmd)
+}
+
+choose_depth_format :: proc() -> vk.Format {
+	for format in ([]vk.Format{.D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT}) {
+		props: vk.FormatProperties
+		vk.GetPhysicalDeviceFormatProperties(g_physical_device, format, &props)
+		if .DEPTH_STENCIL_ATTACHMENT in props.optimalTilingFeatures {
+			return format
+		}
+	}
+	log.panic("vulkan: no supported depth format")
+}
+
+create_depth_resources :: proc() {
+	g_depth_format = choose_depth_format()
+	g_depth_image, g_depth_memory = create_image(
+		g_swapchain_extent.width,
+		g_swapchain_extent.height,
+		g_depth_format,
+		{.DEPTH_STENCIL_ATTACHMENT},
+	)
+	g_depth_view = create_image_view(g_depth_image, g_depth_format, {.DEPTH})
+}
+
+destroy_depth_resources :: proc() {
+	vk.DestroyImageView(g_device, g_depth_view, nil)
+	vk.DestroyImage(g_device, g_depth_image, nil)
+	vk.FreeMemory(g_device, g_depth_memory, nil)
+}
+
+create_vertex_stream :: proc(stream: ^Vertex_Stream, vertex_size: int) {
+	size := vk.DeviceSize(MAX_VERTICES * vertex_size)
 
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
-		buffer_info := vk.BufferCreateInfo {
-			sType       = .BUFFER_CREATE_INFO,
-			size        = size,
-			usage       = {.VERTEX_BUFFER},
-			sharingMode = .EXCLUSIVE,
-		}
-		must(vk.CreateBuffer(g_device, &buffer_info, nil, &g_vertex_buffers[i]))
-
-		reqs: vk.MemoryRequirements
-		vk.GetBufferMemoryRequirements(g_device, g_vertex_buffers[i], &reqs)
-
-		alloc_info := vk.MemoryAllocateInfo {
-			sType           = .MEMORY_ALLOCATE_INFO,
-			allocationSize  = reqs.size,
-			memoryTypeIndex = find_memory_type(reqs.memoryTypeBits, {.HOST_VISIBLE, .HOST_COHERENT}),
-		}
-		must(vk.AllocateMemory(g_device, &alloc_info, nil, &g_vertex_buffer_memories[i]))
-		must(vk.BindBufferMemory(g_device, g_vertex_buffers[i], g_vertex_buffer_memories[i], 0))
-
-		data: rawptr
-		must(vk.MapMemory(g_device, g_vertex_buffer_memories[i], 0, size, {}, &data))
-		g_vertex_buffer_mapped[i] = cast([^]Vertex)data
+		stream.buffers[i], stream.memories[i] = create_buffer(size, {.VERTEX_BUFFER}, {.HOST_VISIBLE, .HOST_COHERENT})
+		must(vk.MapMemory(g_device, stream.memories[i], 0, size, {}, &stream.mapped[i]))
 	}
 }
 
-destroy_vertex_buffers :: proc() {
+destroy_vertex_stream :: proc(stream: ^Vertex_Stream) {
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
-		vk.UnmapMemory(g_device, g_vertex_buffer_memories[i])
-		vk.DestroyBuffer(g_device, g_vertex_buffers[i], nil)
-		vk.FreeMemory(g_device, g_vertex_buffer_memories[i], nil)
+		vk.UnmapMemory(g_device, stream.memories[i])
+		vk.DestroyBuffer(g_device, stream.buffers[i], nil)
+		vk.FreeMemory(g_device, stream.memories[i], nil)
 	}
 }
 
-upload_vertices :: proc(frame: int) {
-	count := min(len(g_vertices), MAX_VERTICES)
-	if count < len(g_vertices) {
-		log.warnf("wassily: %v vertices exceeds MAX_VERTICES, truncating", len(g_vertices))
+upload_vertex_stream :: proc(stream: ^Vertex_Stream, frame: int, vertices: []$T) {
+	count := min(len(vertices), MAX_VERTICES)
+	if count < len(vertices) {
+		log.warnf("wassily: %v vertices exceeds MAX_VERTICES, truncating", len(vertices))
 	}
-	runtime.mem_copy(g_vertex_buffer_mapped[frame], raw_data(g_vertices), count * size_of(Vertex))
-	g_vertex_counts[frame] = u32(count)
+	runtime.mem_copy(stream.mapped[frame], raw_data(vertices), count * size_of(T))
+	stream.counts[frame] = u32(count)
+}
+
+create_texture_resources :: proc() {
+	sampler_binding := vk.DescriptorSetLayoutBinding {
+		binding         = 0,
+		descriptorType  = .COMBINED_IMAGE_SAMPLER,
+		descriptorCount = 1,
+		stageFlags      = {.FRAGMENT},
+	}
+	layout_info := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &sampler_binding,
+	}
+	must(vk.CreateDescriptorSetLayout(g_device, &layout_info, nil, &g_descriptor_set_layout))
+
+	pool_size := vk.DescriptorPoolSize {
+		type            = .COMBINED_IMAGE_SAMPLER,
+		descriptorCount = MAX_TEXTURES,
+	}
+	pool_info := vk.DescriptorPoolCreateInfo {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		maxSets       = MAX_TEXTURES,
+		poolSizeCount = 1,
+		pPoolSizes    = &pool_size,
+	}
+	must(vk.CreateDescriptorPool(g_device, &pool_info, nil, &g_descriptor_pool))
+
+	sampler_info := vk.SamplerCreateInfo {
+		sType        = .SAMPLER_CREATE_INFO,
+		magFilter    = .LINEAR,
+		minFilter    = .LINEAR,
+		mipmapMode   = .LINEAR,
+		addressModeU = .REPEAT,
+		addressModeV = .REPEAT,
+		addressModeW = .REPEAT,
+		maxLod       = 0,
+	}
+	must(vk.CreateSampler(g_device, &sampler_info, nil, &g_sampler))
+}
+
+destroy_texture_resources :: proc() {
+	vk.DestroySampler(g_device, g_sampler, nil)
+	vk.DestroyDescriptorPool(g_device, g_descriptor_pool, nil)
+	vk.DestroyDescriptorSetLayout(g_device, g_descriptor_set_layout, nil)
+}
+
+Pipeline_Desc :: struct {
+	vert, frag:   vk.ShaderModule,
+	stride:       u32,
+	attributes:   []vk.VertexInputAttributeDescription,
+	topology:     vk.PrimitiveTopology,
+	cull:         vk.CullModeFlags,
+	front_face:   vk.FrontFace,
+	depth:        bool,
+	push_size:    u32,
+	set_layouts:  []vk.DescriptorSetLayout,
+}
+
+create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: vk.PipelineLayout) {
+	stages := [2]vk.PipelineShaderStageCreateInfo {
+		{sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = {.VERTEX}, module = desc.vert, pName = "main"},
+		{sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = {.FRAGMENT}, module = desc.frag, pName = "main"},
+	}
+
+	dynamic_states := []vk.DynamicState{.VIEWPORT, .SCISSOR}
+	dynamic_state := vk.PipelineDynamicStateCreateInfo {
+		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = u32(len(dynamic_states)),
+		pDynamicStates    = raw_data(dynamic_states),
+	}
+
+	binding := vk.VertexInputBindingDescription {
+		binding   = 0,
+		stride    = desc.stride,
+		inputRate = .VERTEX,
+	}
+
+	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		vertexBindingDescriptionCount   = 1,
+		pVertexBindingDescriptions      = &binding,
+		vertexAttributeDescriptionCount = u32(len(desc.attributes)),
+		pVertexAttributeDescriptions    = raw_data(desc.attributes),
+	}
+
+	input_assembly := vk.PipelineInputAssemblyStateCreateInfo {
+		sType    = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology = desc.topology,
+	}
+
+	viewport_state := vk.PipelineViewportStateCreateInfo {
+		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		scissorCount  = 1,
+	}
+
+	rasterizer := vk.PipelineRasterizationStateCreateInfo {
+		sType       = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		polygonMode = .FILL,
+		lineWidth   = 1,
+		cullMode    = desc.cull,
+		frontFace   = desc.front_face,
+	}
+
+	multisampling := vk.PipelineMultisampleStateCreateInfo {
+		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		rasterizationSamples = {._1},
+		minSampleShading     = 1,
+	}
+
+	depth_stencil := vk.PipelineDepthStencilStateCreateInfo {
+		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable  = b32(desc.depth),
+		depthWriteEnable = b32(desc.depth),
+		depthCompareOp   = .LESS,
+	}
+
+	color_blend_attachment := vk.PipelineColorBlendAttachmentState {
+		colorWriteMask = {.R, .G, .B, .A},
+	}
+
+	color_blending := vk.PipelineColorBlendStateCreateInfo {
+		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		attachmentCount = 1,
+		pAttachments    = &color_blend_attachment,
+	}
+
+	push_range := vk.PushConstantRange {
+		stageFlags = {.VERTEX},
+		size       = desc.push_size,
+	}
+
+	layout_info := vk.PipelineLayoutCreateInfo {
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount         = u32(len(desc.set_layouts)),
+		pSetLayouts            = raw_data(desc.set_layouts),
+		pushConstantRangeCount = 1 if desc.push_size > 0 else 0,
+		pPushConstantRanges    = &push_range,
+	}
+	must(vk.CreatePipelineLayout(g_device, &layout_info, nil, &layout))
+
+	pipeline_info := vk.GraphicsPipelineCreateInfo {
+		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+		stageCount          = len(stages),
+		pStages             = &stages[0],
+		pVertexInputState   = &vertex_input_info,
+		pInputAssemblyState = &input_assembly,
+		pViewportState      = &viewport_state,
+		pRasterizationState = &rasterizer,
+		pMultisampleState   = &multisampling,
+		pDepthStencilState  = &depth_stencil,
+		pColorBlendState    = &color_blending,
+		pDynamicState       = &dynamic_state,
+		layout              = layout,
+		renderPass          = g_render_pass,
+		subpass             = 0,
+		basePipelineIndex   = -1,
+	}
+	must(vk.CreateGraphicsPipelines(g_device, 0, 1, &pipeline_info, nil, &pipeline))
+	return
 }

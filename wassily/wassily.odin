@@ -6,6 +6,7 @@ TITLE 	:: "wassily"
 
 import "core:fmt"
 import "core:math"
+import "core:math/linalg"
 import "core:slice"
 import "core:log"
 
@@ -19,8 +20,65 @@ Vertex2D :: struct {
 
 Vertex3D :: struct {
 	position: [3]f32,
+	uv: [2]f32,
 	color: [3]f32
 }
+
+LineVertex :: struct {
+	position: [3]f32,
+	color: [3]f32
+}
+
+Vector3 :: [3]f64
+
+// Colors are 0-255 per channel.
+Color :: [3]f64
+
+// Rotation is Euler angles in degrees, applied in X, Y, Z order.
+Transform :: struct {
+	position: Vector3,
+	rotation: Vector3,
+	scale: Vector3,
+}
+
+Mesh :: struct {
+	vertex_buffer: vk.Buffer,
+	vertex_memory: vk.DeviceMemory,
+	index_buffer: vk.Buffer,
+	index_memory: vk.DeviceMemory,
+	index_count: u32,
+}
+
+Texture :: struct {
+	image: vk.Image,
+	memory: vk.DeviceMemory,
+	view: vk.ImageView,
+	descriptor_set: vk.DescriptorSet,
+}
+
+Mesh_Draw :: struct {
+	mesh: Mesh,
+	texture: Texture,
+	model: matrix[4, 4]f64,
+}
+
+Camera :: struct {
+	position: Vector3,
+	target: Vector3,
+	up: Vector3,
+	fov: f64,
+}
+
+CAMERA_NEAR :: 0.1
+CAMERA_FAR :: 1000.0
+MAX_TEXTURES :: 64
+
+g_camera := Camera{position = {0, 0, -10}, target = {0, 0, 0}, up = {0, 1, 0}, fov = 60}
+g_mesh_draws: [dynamic]Mesh_Draw
+g_line_vertices: [dynamic]LineVertex
+g_line_stream: Vertex_Stream
+g_meshes: [dynamic]Mesh
+g_textures: [dynamic]Texture
 
 hello :: proc()
 {
@@ -52,13 +110,52 @@ fillCircle :: proc(x: int, y: int, radius: int, colorR : int, colorG : int, colo
         a0 := f32(i)   / CIRCLE_SEGMENTS * 2 * math.PI
         a1 := f32(i+1) / CIRCLE_SEGMENTS * 2 * math.PI
 
-        append(&g_vertices, Vertex{{cx, cy}, color})
-        append(&g_vertices, Vertex{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, color})
-        append(&g_vertices, Vertex{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, color})
+        append(&g_vertices, Vertex2D{{cx, cy}, color})
+        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, color})
+        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, color})
     }
 }
 
-run :: proc(loopfn : proc())
+camera :: proc(position: Vector3, target: Vector3, up: Vector3, fov: f64)
+{
+	g_camera = {position, target, up, fov}
+}
+
+drawMesh :: proc(mesh: Mesh, transform: Transform, texture: Texture)
+{
+	DEG :: math.PI / 180
+	r := transform.rotation * DEG
+	rotation := linalg.quaternion_from_euler_angles_f64(r.x, r.y, r.z, .XYZ)
+	model := linalg.matrix4_translate_f64(transform.position) *
+		linalg.matrix4_from_quaternion_f64(rotation) *
+		linalg.matrix4_scale_f64(transform.scale)
+	append(&g_mesh_draws, Mesh_Draw{mesh, texture, model})
+}
+
+drawLine3D :: proc(a: Vector3, b: Vector3, color: Color)
+{
+	c := linalg.array_cast(color / 255, f32)
+	append(&g_line_vertices, LineVertex{linalg.array_cast(a, f32), c})
+	append(&g_line_vertices, LineVertex{linalg.array_cast(b, f32), c})
+}
+
+// Right-handed view, Vulkan clip space: depth in [0, 1] and Y pointing down.
+camera_view_proj :: proc(aspect: f64) -> matrix[4, 4]f64
+{
+	view := linalg.matrix4_look_at_f64(g_camera.position, g_camera.target, g_camera.up)
+
+	f := 1 / math.tan(g_camera.fov * math.PI / 180 / 2)
+	n, far := f64(CAMERA_NEAR), f64(CAMERA_FAR)
+	proj := matrix[4, 4]f64 {
+		f / aspect, 0, 0, 0,
+		0, -f, 0, 0,
+		0, 0, far / (n - far), n * far / (n - far),
+		0, 0, -1, 0,
+	}
+	return proj * view
+}
+
+run :: proc(initfn : proc(), loopfn : proc())
 {
 	context.logger = log.create_console_logger()
 	g_ctx = context
@@ -197,38 +294,32 @@ run :: proc(loopfn : proc())
 	create_swapchain()
 	defer destroy_swapchain()
 
-	// Load shaders.
-	{
-		g_vert_shader_module = create_shader_module(SHADER_VERT)
-		g_shader_stages[0] = vk.PipelineShaderStageCreateInfo {
-			sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage  = {.VERTEX},
-			module = g_vert_shader_module,
-			pName  = "main",
-		}
-
-		g_frag_shader_module = create_shader_module(SHADER_FRAG)
-		g_shader_stages[1] = vk.PipelineShaderStageCreateInfo {
-			sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage  = {.FRAGMENT},
-			module = g_frag_shader_module,
-			pName  = "main",
-		}
-	}
-	defer vk.DestroyShaderModule(g_device, g_vert_shader_module, nil)
-	defer vk.DestroyShaderModule(g_device, g_frag_shader_module, nil)
+	create_depth_resources()
+	defer destroy_depth_resources()
 
 	// Set up render pass.
 	{
-		color_attachment := vk.AttachmentDescription {
-			format         = g_swapchain_format.format,
-			samples        = {._1},
-			loadOp         = .CLEAR,
-			storeOp        = .STORE,
-			stencilLoadOp  = .DONT_CARE,
-			stencilStoreOp = .DONT_CARE,
-			initialLayout  = .UNDEFINED,
-			finalLayout    = .PRESENT_SRC_KHR,
+		attachments := [2]vk.AttachmentDescription {
+			{
+				format         = g_swapchain_format.format,
+				samples        = {._1},
+				loadOp         = .CLEAR,
+				storeOp        = .STORE,
+				stencilLoadOp  = .DONT_CARE,
+				stencilStoreOp = .DONT_CARE,
+				initialLayout  = .UNDEFINED,
+				finalLayout    = .PRESENT_SRC_KHR,
+			},
+			{
+				format         = g_depth_format,
+				samples        = {._1},
+				loadOp         = .CLEAR,
+				storeOp        = .DONT_CARE,
+				stencilLoadOp  = .DONT_CARE,
+				stencilStoreOp = .DONT_CARE,
+				initialLayout  = .UNDEFINED,
+				finalLayout    = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+			},
 		}
 
 		color_attachment_ref := vk.AttachmentReference {
@@ -236,25 +327,32 @@ run :: proc(loopfn : proc())
 			layout     = .COLOR_ATTACHMENT_OPTIMAL,
 		}
 
-		subpass := vk.SubpassDescription {
-			pipelineBindPoint    = .GRAPHICS,
-			colorAttachmentCount = 1,
-			pColorAttachments    = &color_attachment_ref,
+		depth_attachment_ref := vk.AttachmentReference {
+			attachment = 1,
+			layout     = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		}
 
+		subpass := vk.SubpassDescription {
+			pipelineBindPoint       = .GRAPHICS,
+			colorAttachmentCount    = 1,
+			pColorAttachments       = &color_attachment_ref,
+			pDepthStencilAttachment = &depth_attachment_ref,
+		}
+
+		// The single depth image is shared across frames in flight, so writes must wait on the previous frame's.
 		dependency := vk.SubpassDependency {
 			srcSubpass    = vk.SUBPASS_EXTERNAL,
 			dstSubpass    = 0,
-			srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-			srcAccessMask = {},
-			dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-			dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS},
+			srcAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+			dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS},
+			dstAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 		}
 
 		render_pass := vk.RenderPassCreateInfo {
 			sType           = .RENDER_PASS_CREATE_INFO,
-			attachmentCount = 1,
-			pAttachments    = &color_attachment,
+			attachmentCount = len(attachments),
+			pAttachments    = &attachments[0],
 			subpassCount    = 1,
 			pSubpasses      = &subpass,
 			dependencyCount = 1,
@@ -268,94 +366,71 @@ run :: proc(loopfn : proc())
 	create_framebuffers()
 	defer destroy_framebuffers()
 
-	// Set up pipeline.
+	create_texture_resources()
+	defer destroy_texture_resources()
+
+	// Set up pipelines.
 	{
-		dynamic_states := []vk.DynamicState{.VIEWPORT, .SCISSOR}
-		dynamic_state := vk.PipelineDynamicStateCreateInfo {
-			sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-			dynamicStateCount = 2,
-			pDynamicStates    = raw_data(dynamic_states),
+		vert_2d := create_shader_module(SHADER_VERT)
+		frag_2d := create_shader_module(SHADER_FRAG)
+		mesh_vert := create_shader_module(SHADER_MESH_VERT)
+		mesh_frag := create_shader_module(SHADER_MESH_FRAG)
+		line_vert := create_shader_module(SHADER_LINE_VERT)
+		defer for module in ([]vk.ShaderModule{vert_2d, frag_2d, mesh_vert, mesh_frag, line_vert}) {
+			vk.DestroyShaderModule(g_device, module, nil)
 		}
 
-		binding := vk.VertexInputBindingDescription {
-			binding   = 0,
-			stride    = size_of(Vertex),
-			inputRate = .VERTEX,
-		}
+		g_pipeline, g_pipeline_layout = create_pipeline({
+			vert       = vert_2d,
+			frag       = frag_2d,
+			stride     = size_of(Vertex2D),
+			attributes = {
+				{location = 0, format = .R32G32_SFLOAT,    offset = u32(offset_of(Vertex2D, position))},
+				{location = 1, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex2D, color))},
+			},
+			topology   = .TRIANGLE_LIST,
+			cull       = {.BACK},
+			front_face = .CLOCKWISE,
+		})
 
-		attributes := []vk.VertexInputAttributeDescription {
-			{location = 0, binding = 0, format = .R32G32_SFLOAT,    offset = u32(offset_of(Vertex, position))},
-			{location = 1, binding = 0, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex, color))},
-		}
+		// Projection flips Y, so the counter-clockwise OBJ winding stays counter-clockwise on screen.
+		g_mesh_pipeline, g_mesh_pipeline_layout = create_pipeline({
+			vert        = mesh_vert,
+			frag        = mesh_frag,
+			stride      = size_of(Vertex3D),
+			attributes  = {
+				{location = 0, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex3D, position))},
+				{location = 1, format = .R32G32_SFLOAT,    offset = u32(offset_of(Vertex3D, uv))},
+				{location = 2, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex3D, color))},
+			},
+			topology    = .TRIANGLE_LIST,
+			cull        = {.BACK},
+			front_face  = .COUNTER_CLOCKWISE,
+			depth       = true,
+			push_size   = size_of(matrix[4, 4]f32),
+			set_layouts = {g_descriptor_set_layout},
+		})
 
-		vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
-			sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-			vertexBindingDescriptionCount   = 1,
-			pVertexBindingDescriptions      = &binding,
-			vertexAttributeDescriptionCount = u32(len(attributes)),
-			pVertexAttributeDescriptions    = raw_data(attributes),
-		}
-
-		input_assembly := vk.PipelineInputAssemblyStateCreateInfo {
-			sType    = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-			topology = .TRIANGLE_LIST,
-		}
-
-		viewport_state := vk.PipelineViewportStateCreateInfo {
-			sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-			viewportCount = 1,
-			scissorCount  = 1,
-		}
-
-		rasterizer := vk.PipelineRasterizationStateCreateInfo {
-			sType       = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-			polygonMode = .FILL,
-			lineWidth   = 1,
-			cullMode    = {.BACK},
-			frontFace   = .CLOCKWISE,
-		}
-
-		multisampling := vk.PipelineMultisampleStateCreateInfo {
-			sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-			rasterizationSamples = {._1},
-			minSampleShading     = 1,
-		}
-
-		color_blend_attachment := vk.PipelineColorBlendAttachmentState {
-			colorWriteMask = {.R, .G, .B, .A},
-		}
-
-		color_blending := vk.PipelineColorBlendStateCreateInfo {
-			sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-			attachmentCount = 1,
-			pAttachments    = &color_blend_attachment,
-		}
-
-		pipeline_layout := vk.PipelineLayoutCreateInfo {
-			sType = .PIPELINE_LAYOUT_CREATE_INFO,
-		}
-		must(vk.CreatePipelineLayout(g_device, &pipeline_layout, nil, &g_pipeline_layout))
-
-		pipeline := vk.GraphicsPipelineCreateInfo {
-			sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
-			stageCount          = 2,
-			pStages             = &g_shader_stages[0],
-			pVertexInputState   = &vertex_input_info,
-			pInputAssemblyState = &input_assembly,
-			pViewportState      = &viewport_state,
-			pRasterizationState = &rasterizer,
-			pMultisampleState   = &multisampling,
-			pColorBlendState    = &color_blending,
-			pDynamicState       = &dynamic_state,
-			layout              = g_pipeline_layout,
-			renderPass          = g_render_pass,
-			subpass             = 0,
-			basePipelineIndex   = -1,
-		}
-		must(vk.CreateGraphicsPipelines(g_device, 0, 1, &pipeline, nil, &g_pipeline))
+		// Line shader outputs the same varyings as the 2D shader, so it reuses its fragment stage.
+		g_line_pipeline, g_line_pipeline_layout = create_pipeline({
+			vert       = line_vert,
+			frag       = frag_2d,
+			stride     = size_of(LineVertex),
+			attributes = {
+				{location = 0, format = .R32G32B32_SFLOAT, offset = u32(offset_of(LineVertex, position))},
+				{location = 1, format = .R32G32B32_SFLOAT, offset = u32(offset_of(LineVertex, color))},
+			},
+			topology   = .LINE_LIST,
+			depth      = true,
+			push_size  = size_of(matrix[4, 4]f32),
+		})
 	}
 	defer vk.DestroyPipelineLayout(g_device, g_pipeline_layout, nil)
 	defer vk.DestroyPipeline(g_device, g_pipeline, nil)
+	defer vk.DestroyPipelineLayout(g_device, g_mesh_pipeline_layout, nil)
+	defer vk.DestroyPipeline(g_device, g_mesh_pipeline, nil)
+	defer vk.DestroyPipelineLayout(g_device, g_line_pipeline_layout, nil)
+	defer vk.DestroyPipeline(g_device, g_line_pipeline, nil)
 
 	// Create command pool.
 	{
@@ -395,9 +470,18 @@ run :: proc(loopfn : proc())
 	defer for sem in g_render_finished_semaphores {vk.DestroySemaphore(g_device, sem, nil)}
 	defer for fence in g_in_flight_fences {vk.DestroyFence(g_device, fence, nil)}
 
-	create_vertex_buffers()
-	defer destroy_vertex_buffers()
+	create_vertex_stream(&g_vertex_stream, size_of(Vertex2D))
+	defer destroy_vertex_stream(&g_vertex_stream)
 	defer delete(g_vertices)
+
+	create_vertex_stream(&g_line_stream, size_of(LineVertex))
+	defer destroy_vertex_stream(&g_line_stream)
+	defer delete(g_line_vertices)
+	defer delete(g_mesh_draws)
+
+	initfn()
+	free_all(context.temp_allocator)
+	defer destroy_assets()
 
 	current_frame := 0
 	for !glfw.WindowShouldClose(g_window) {
@@ -430,8 +514,11 @@ run :: proc(loopfn : proc())
 		must(vk.ResetFences(g_device, 1, &g_in_flight_fences[current_frame]))
 
 		clear(&g_vertices)
+		clear(&g_line_vertices)
+		clear(&g_mesh_draws)
 		loopfn()
-		upload_vertices(current_frame)
+		upload_vertex_stream(&g_vertex_stream, current_frame, g_vertices[:])
+		upload_vertex_stream(&g_line_stream, current_frame, g_line_vertices[:])
 
 		must(vk.ResetCommandBuffer(g_command_buffers[current_frame], {}))
 		record_command_buffer(g_command_buffers[current_frame], image_index, current_frame)
