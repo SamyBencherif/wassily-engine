@@ -79,6 +79,7 @@ g_line_vertices: [dynamic]LineVertex
 g_line_stream: Vertex_Stream
 g_meshes: [dynamic]Mesh
 g_textures: [dynamic]Texture
+g_dt: f64
 
 hello :: proc()
 {
@@ -95,24 +96,51 @@ time :: proc() -> f64
 	return glfw.GetTime()
 }
 
+// Seconds elapsed between the previous frame and the current one.
+dt :: proc() -> f64
+{
+	return g_dt
+}
+
+Key :: enum i32 {
+	A      = glfw.KEY_A,
+	D      = glfw.KEY_D,
+	E      = glfw.KEY_E,
+	Q      = glfw.KEY_Q,
+	S      = glfw.KEY_S,
+	W      = glfw.KEY_W,
+	Space  = glfw.KEY_SPACE,
+	Escape = glfw.KEY_ESCAPE,
+	Shift  = glfw.KEY_LEFT_SHIFT,
+	Up     = glfw.KEY_UP,
+	Down   = glfw.KEY_DOWN,
+	Left   = glfw.KEY_LEFT,
+	Right  = glfw.KEY_RIGHT,
+}
+
+is_down :: proc(key: Key) -> bool
+{
+	return glfw.GetKey(g_window, i32(key)) == glfw.PRESS
+}
+
 CIRCLE_SEGMENTS :: 64
 
 // Coordinates are pixels in a WIDTH x HEIGHT canvas, origin top-left; colors are 0-255.
-fillCircle :: proc(x: int, y: int, radius: int, colorR : int, colorG : int, colorB : int)
+fill_circle :: proc(x: int, y: int, radius: int, color: Color)
 {
     cx := f32(x) / WIDTH  * 2 - 1
     cy := f32(y) / HEIGHT * 2 - 1
     rx := f32(radius) / WIDTH  * 2
     ry := f32(radius) / HEIGHT * 2
-    color := [3]f32{f32(colorR), f32(colorG), f32(colorB)} / 255
+    c := linalg.array_cast(color / 255, f32)
 
     for i in 0 ..< CIRCLE_SEGMENTS {
         a0 := f32(i)   / CIRCLE_SEGMENTS * 2 * math.PI
         a1 := f32(i+1) / CIRCLE_SEGMENTS * 2 * math.PI
 
-        append(&g_vertices, Vertex2D{{cx, cy}, color})
-        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, color})
-        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, color})
+        append(&g_vertices, Vertex2D{{cx, cy}, c})
+        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, c})
+        append(&g_vertices, Vertex2D{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, c})
     }
 }
 
@@ -121,7 +149,7 @@ camera :: proc(position: Vector3, target: Vector3, up: Vector3, fov: f64)
 	g_camera = {position, target, up, fov}
 }
 
-drawMesh :: proc(mesh: Mesh, transform: Transform, texture: Texture)
+draw_mesh :: proc(mesh: Mesh, transform: Transform, texture: Texture)
 {
 	DEG :: math.PI / 180
 	r := transform.rotation * DEG
@@ -132,7 +160,7 @@ drawMesh :: proc(mesh: Mesh, transform: Transform, texture: Texture)
 	append(&g_mesh_draws, Mesh_Draw{mesh, texture, model})
 }
 
-drawLine3D :: proc(a: Vector3, b: Vector3, color: Color)
+draw_line_3d :: proc(a: Vector3, b: Vector3, color: Color)
 {
 	c := linalg.array_cast(color / 255, f32)
 	append(&g_line_vertices, LineVertex{linalg.array_cast(a, f32), c})
@@ -484,10 +512,15 @@ run :: proc(initfn : proc(), loopfn : proc())
 	defer destroy_assets()
 
 	current_frame := 0
+	last_time := glfw.GetTime()
 	for !glfw.WindowShouldClose(g_window) {
 		free_all(context.temp_allocator)
 
 		glfw.PollEvents()
+
+		now := glfw.GetTime()
+		g_dt = now - last_time
+		last_time = now
 
 		// Wait for previous frame.
 		must(vk.WaitForFences(g_device, 1, &g_in_flight_fences[current_frame], true, max(u64)))

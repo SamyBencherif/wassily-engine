@@ -10,7 +10,7 @@ import stbi "vendor:stb/image"
 import vk "vendor:vulkan"
 
 // Loads a Wavefront OBJ (positions, UVs; faces are fan-triangulated). Call from init.
-loadMesh :: proc(path: string) -> Mesh
+load_mesh :: proc(path: string) -> Mesh
 {
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil {
@@ -61,7 +61,7 @@ loadMesh :: proc(path: string) -> Mesh
 }
 
 // Loads a PNG/JPG/etc. as an sRGB texture. Call from init.
-loadTexture :: proc(path: string) -> Texture
+load_texture :: proc(path: string) -> Texture
 {
 	if len(g_textures) >= MAX_TEXTURES {
 		log.panicf("wassily: more than %v textures loaded", MAX_TEXTURES)

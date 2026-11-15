@@ -5,48 +5,50 @@ import "core:math"
 
 mesh : wassily.Mesh
 tex: wassily.Texture
-camPos : wassily.Vector3
+cam_pos : wassily.Vector3
 
 init :: proc()
 {
-    mesh = wassily.loadMesh("assets/cube.obj")
-    tex  = wassily.loadTexture("assets/brick.jpg")
+    mesh = wassily.load_mesh("assets/cube.obj")
+    tex  = wassily.load_texture("assets/brick.jpg")
 
-    camPos = wassily.Vector3{0, 0, -10}
+    cam_pos = wassily.Vector3{0, 0, -10}
 }
 
 loop :: proc() 
 {
     w, h := wassily.size()
 
-    camTarget := wassily.Vector3{0, 0, 0}
-    camUp := wassily.Vector3{0, 1, 0}
-    camFov : f64 = 60
+    cam_up := wassily.Vector3{0, 1, 0}
+    cam_fov : f64 = 60
+    cam_speed : f64 = 5 // units per second
 
-    if wassily.is_down(wassily.KEY_W)
+    if wassily.is_down(.W)
     {
-        camPos += wassily.Vector3{0, 0, 1}
+        cam_pos += wassily.Vector3{0, 0, 1} * cam_speed * wassily.dt()
     }
 
-    if wassily.is_down(wassily.KEY_S)
+    if wassily.is_down(.S)
     {
-        camPos += wassily.Vector3{0, 0, -1}
+        cam_pos += wassily.Vector3{0, 0, -1} * cam_speed * wassily.dt()
     }
 
-    wassily.camera(camPos, camTarget, camUp, camFov)
+    cam_target := cam_pos + wassily.Vector3{0, 0, 1}
 
-    cubePos := wassily.Vector3{0, 0, 0}
-    cubeRot := wassily.Vector3{180*wassily.time(), 180*wassily.time(), 180*wassily.time()} // given in Euler angles
-    cubeSca := wassily.Vector3{1, 1, 1}
+    wassily.camera(cam_pos, cam_target, cam_up, cam_fov)
 
-    transform := wassily.Transform{cubePos, cubeRot, cubeSca}
-    wassily.drawMesh(mesh, transform, tex)
+    cube_pos := wassily.Vector3{0, 0, 0}
+    cube_rot := wassily.Vector3{180*wassily.time(), 180*wassily.time(), 180*wassily.time()} // given in Euler angles
+    cube_sca := wassily.Vector3{1, 1, 1}
+
+    transform := wassily.Transform{cube_pos, cube_rot, cube_sca}
+    wassily.draw_mesh(mesh, transform, tex)
     
     a := wassily.Vector3{3, 3, 3}
     b := wassily.Vector3{5, 5, 5}
     color := wassily.Color{255, 100, 100}
 
-    wassily.drawLine3D(a, b, color) 
+    wassily.draw_line_3d(a, b, color) 
 }
 
 main :: proc() 
