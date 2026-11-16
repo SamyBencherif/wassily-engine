@@ -9,8 +9,8 @@ cam_pos : wassily.Vector3
 
 init :: proc()
 {
-    mesh = wassily.load_mesh("assets/cube.obj")
-    tex  = wassily.load_texture("assets/brick.jpg")
+    mesh = wassily.load_mesh("assets/room.obj")
+    tex  = wassily.load_texture("assets/radial-wall.png")
 
     cam_pos = wassily.Vector3{0, 0, -10}
 }
@@ -33,12 +33,22 @@ loop :: proc()
         cam_pos += wassily.Vector3{0, 0, -1} * cam_speed * wassily.dt()
     }
 
+    if wassily.is_down(.A)
+    {
+        cam_pos += wassily.Vector3{1, 0, 0} * cam_speed * wassily.dt()
+    }
+
+    if wassily.is_down(.D)
+    {
+        cam_pos += wassily.Vector3{-1, 0, 0} * cam_speed * wassily.dt()
+    }
+
     cam_target := cam_pos + wassily.Vector3{0, 0, 1}
 
     wassily.camera(cam_pos, cam_target, cam_up, cam_fov)
 
     cube_pos := wassily.Vector3{0, 0, 0}
-    cube_rot := wassily.Vector3{180*wassily.time(), 180*wassily.time(), 180*wassily.time()} // given in Euler angles
+    cube_rot := wassily.Vector3{0, 0, 0}
     cube_sca := wassily.Vector3{1, 1, 1}
 
     transform := wassily.Transform{cube_pos, cube_rot, cube_sca}
