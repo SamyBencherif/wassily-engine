@@ -139,6 +139,25 @@ is_down :: proc(key: Key) -> bool
 	return glfw.GetKey(g_window, i32(key)) == glfw.PRESS
 }
 
+// Windowed position and size to restore when leaving fullscreen.
+@(private = "file")
+g_windowed_rect: [4]i32
+
+@(private = "file")
+toggle_fullscreen :: proc "contextless" (window: glfw.WindowHandle)
+{
+	if glfw.GetWindowMonitor(window) != nil {
+		r := g_windowed_rect
+		glfw.SetWindowMonitor(window, nil, r.x, r.y, r.z, r.w, glfw.DONT_CARE)
+		return
+	}
+	g_windowed_rect.x, g_windowed_rect.y = glfw.GetWindowPos(window)
+	g_windowed_rect.z, g_windowed_rect.w = glfw.GetWindowSize(window)
+	monitor := glfw.GetPrimaryMonitor()
+	mode := glfw.GetVideoMode(monitor)
+	glfw.SetWindowMonitor(window, monitor, 0, 0, mode.width, mode.height, mode.refresh_rate)
+}
+
 CIRCLE_SEGMENTS :: 64
 
 // Coordinates are pixels in a WIDTH x HEIGHT canvas, origin top-left; colors are 0-255.
@@ -235,6 +254,11 @@ run :: proc(initfn : proc(), loopfn : proc())
 
 	glfw.SetFramebufferSizeCallback(g_window, proc "c" (_: glfw.WindowHandle, _, _: i32) {
 		g_framebuffer_resized = true
+	})
+	glfw.SetKeyCallback(g_window, proc "c" (window: glfw.WindowHandle, key, _, action, _: i32) {
+		if key == glfw.KEY_F11 && action == glfw.PRESS {
+			toggle_fullscreen(window)
+		}
 	})
 
 	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
