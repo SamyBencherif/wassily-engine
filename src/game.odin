@@ -15,7 +15,7 @@ init :: proc()
 
 loop :: proc() 
 {
-    wassily.update_first_person_controller(&player)
+    wassily.update_first_person_controller(&player, world.collider)
 
     cube_pos := wassily.Vector3{0, 0, 0}
     cube_rot := wassily.Vector3{0, 0, 0}

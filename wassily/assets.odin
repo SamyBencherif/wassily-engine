@@ -26,6 +26,7 @@ load_model :: proc(path: string) -> Model
 
 	textures := make(map[^cgltf.image]Texture, allocator = context.temp_allocator)
 	model: Model
+	collider := make([dynamic]Triangle)
 
 	for &node, i in data.nodes {
 		if node.mesh == nil {
@@ -97,9 +98,24 @@ load_model :: proc(path: string) -> Model
 		world: [16]f32
 		cgltf.node_transform_world(&node, &world[0])
 
+		local := linalg.matrix_cast(transmute(matrix[4, 4]f32)world, f64)
+
+		if node.name != nil && strings.has_prefix(string(node.name), "_collider") {
+			delete(primitives)
+			for i := 0; i + 2 < len(indices); i += 3 {
+				triangle: Triangle
+				for k in 0 ..< 3 {
+					p := linalg.array_cast(vertices[indices[i + k]].position, f64)
+					triangle[k] = (local * [4]f64{p.x, p.y, p.z, 1}).xyz
+				}
+				append(&collider, triangle)
+			}
+			continue
+		}
+
 		mesh := Mesh {
 			primitives = primitives[:],
-			local      = linalg.matrix_cast(transmute(matrix[4, 4]f32)world, f64),
+			local      = local,
 		}
 		mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(vertices[:]), {.VERTEX_BUFFER})
 		mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(indices[:]), {.INDEX_BUFFER})
@@ -109,6 +125,7 @@ load_model :: proc(path: string) -> Model
 		model.objects[name] = mesh
 	}
 
+	model.collider = collider[:]
 	append(&g_models, model)
 	return model
 }
@@ -259,6 +276,7 @@ destroy_assets :: proc()
 			delete(name)
 		}
 		delete(model.objects)
+		delete(model.collider)
 	}
 	delete(g_meshes)
 	delete(g_models)

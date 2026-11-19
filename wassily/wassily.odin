@@ -65,9 +65,13 @@ Mesh :: struct {
 	local: matrix[4, 4]f64,
 }
 
-// Objects keyed by their Blender object name.
+Triangle :: [3]Vector3
+
+// Objects keyed by their Blender object name. Objects named "_collider*" are not drawn;
+// their triangles go into collider, in model space.
 Model :: struct {
 	objects: map[string]Mesh,
+	collider: []Triangle,
 }
 
 Mesh_Draw :: struct {
