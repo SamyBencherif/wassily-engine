@@ -2,6 +2,7 @@ package wassily
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:math/linalg"
 import "core:log"
 import "core:path/filepath"
@@ -29,6 +30,15 @@ load_model :: proc(path: string) -> Model
 	collider := make([dynamic]Triangle)
 
 	for &node, i in data.nodes {
+		if node.name != nil && string(node.name) == "_spawn" {
+			world: [16]f32
+			cgltf.node_transform_world(&node, &world[0])
+			m := linalg.matrix_cast(transmute(matrix[4, 4]f32)world, f64)
+			// Blender's local Z is glTF's local Y after the Y-up conversion.
+			facing := m[1].xyz
+			model.spawn = Spawn{m[3].xyz, math.atan2(facing.x, facing.z) * 180 / math.PI}
+			continue
+		}
 		if node.mesh == nil {
 			continue
 		}

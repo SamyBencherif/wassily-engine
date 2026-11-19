@@ -10,7 +10,17 @@ init :: proc()
 {
     world = wassily.load_model("assets/world.glb")
 
-    player = wassily.first_person_controller({0, 0, 0}, 210)
+    player = wassily.first_person_controller()
+    respawn()
+}
+
+respawn :: proc()
+{
+    spawn := world.spawn.? or_else wassily.Spawn{}
+    player.position = spawn.position
+    player.yaw = spawn.yaw
+    player.pitch = 0
+    player.velocity_y = 0
 }
 
 loop :: proc() 
@@ -26,10 +36,7 @@ loop :: proc()
 
     if player.position.y < -40
     {
-        player.position = {0, 0, 0}
-        player.velocity_y = 0
-        player.yaw = 210
-        player.pitch = 0
+        respawn()
     }
 }
 

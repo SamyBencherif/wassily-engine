@@ -72,6 +72,13 @@ Triangle :: [3]Vector3
 Model :: struct {
 	objects: map[string]Mesh,
 	collider: []Triangle,
+	spawn: Maybe(Spawn),
+}
+
+// From a "_spawn" object; yaw follows its Blender local Z axis (the single-arrow empty direction).
+Spawn :: struct {
+	position: Vector3,
+	yaw: f64,
 }
 
 Mesh_Draw :: struct {
