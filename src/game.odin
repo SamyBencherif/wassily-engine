@@ -17,12 +17,20 @@ loop :: proc()
 {
     wassily.update_first_person_controller(&player, world.collider)
 
-    cube_pos := wassily.Vector3{0, 0, 0}
-    cube_rot := wassily.Vector3{0, 0, 0}
-    cube_sca := wassily.Vector3{1, 1, 1}
+    pos := wassily.Vector3{0, 0, 0}
+    rot := wassily.Vector3{0, 0, 0}
+    sca := wassily.Vector3{1, 1, 1}
 
-    transform := wassily.Transform{cube_pos, cube_rot, cube_sca}
+    transform := wassily.Transform{pos, rot, sca}
     wassily.draw_model(world, transform)
+
+    if player.position.y < -40
+    {
+        player.position = {0, 0, 0}
+        player.velocity_y = 0
+        player.yaw = 210
+        player.pitch = 0
+    }
 }
 
 main :: proc() 
