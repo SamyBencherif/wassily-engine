@@ -532,10 +532,13 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 		for &draw in g_mesh_draws {
 			mvp := linalg.matrix_cast(view_proj * draw.model, f32)
 			vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(mvp), &mvp)
-			vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 0, 1, &draw.texture.descriptor_set, 0, nil)
 			vk.CmdBindVertexBuffers(command_buffer, 0, 1, &draw.mesh.vertex_buffer, &offset)
 			vk.CmdBindIndexBuffer(command_buffer, draw.mesh.index_buffer, 0, .UINT32)
-			vk.CmdDrawIndexed(command_buffer, draw.mesh.index_count, 1, 0, 0, 0)
+			for primitive in draw.mesh.primitives {
+				texture := draw.texture_override.? or_else primitive.texture
+				vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 0, 1, &texture.descriptor_set, 0, nil)
+				vk.CmdDrawIndexed(command_buffer, primitive.index_count, 1, primitive.first_index, 0, 0)
+			}
 		}
 	}
 

@@ -1,4 +1,6 @@
-main:
+GLBS := $(patsubst %.blend,%.glb,$(wildcard assets/*.blend))
+
+main: $(GLBS)
 	# compile shaders
 	glslc wassily/shader.vert -o wassily/vert.spv
 	glslc wassily/shader.frag -o wassily/frag.spv
@@ -8,3 +10,8 @@ main:
 	
 	# run program
 	odin run src
+
+assets/%.glb: assets/%.blend tools/export_gltf.py
+	blender -b $< --python-exit-code 1 --python tools/export_gltf.py -- $@
+
+.PHONY: main

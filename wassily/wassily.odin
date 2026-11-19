@@ -41,14 +41,6 @@ Transform :: struct {
 	scale: Vector3,
 }
 
-Mesh :: struct {
-	vertex_buffer: vk.Buffer,
-	vertex_memory: vk.DeviceMemory,
-	index_buffer: vk.Buffer,
-	index_memory: vk.DeviceMemory,
-	index_count: u32,
-}
-
 Texture :: struct {
 	image: vk.Image,
 	memory: vk.DeviceMemory,
@@ -56,9 +48,31 @@ Texture :: struct {
 	descriptor_set: vk.DescriptorSet,
 }
 
+// A range of a mesh's indices drawn with one material.
+Primitive :: struct {
+	first_index: u32,
+	index_count: u32,
+	texture: Texture,
+}
+
+Mesh :: struct {
+	vertex_buffer: vk.Buffer,
+	vertex_memory: vk.DeviceMemory,
+	index_buffer: vk.Buffer,
+	index_memory: vk.DeviceMemory,
+	primitives: []Primitive,
+	// Object placement from the source file, applied before the draw transform.
+	local: matrix[4, 4]f64,
+}
+
+// Objects keyed by their Blender object name.
+Model :: struct {
+	objects: map[string]Mesh,
+}
+
 Mesh_Draw :: struct {
 	mesh: Mesh,
-	texture: Texture,
+	texture_override: Maybe(Texture),
 	model: matrix[4, 4]f64,
 }
 
@@ -78,7 +92,9 @@ g_mesh_draws: [dynamic]Mesh_Draw
 g_line_vertices: [dynamic]LineVertex
 g_line_stream: Vertex_Stream
 g_meshes: [dynamic]Mesh
+g_models: [dynamic]Model
 g_textures: [dynamic]Texture
+g_white_texture: Maybe(Texture)
 g_dt: f64
 
 hello :: proc()
@@ -149,15 +165,28 @@ camera :: proc(position: Vector3, target: Vector3, up: Vector3, fov: f64)
 	g_camera = {position, target, up, fov}
 }
 
-draw_mesh :: proc(mesh: Mesh, transform: Transform, texture: Texture)
+// texture_override replaces every primitive's own material texture.
+draw_mesh :: proc(mesh: Mesh, transform: Transform, texture_override: Maybe(Texture) = nil)
+{
+	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * mesh.local})
+}
+
+draw_model :: proc(model: Model, transform: Transform, texture_override: Maybe(Texture) = nil)
+{
+	for _, mesh in model.objects {
+		draw_mesh(mesh, transform, texture_override)
+	}
+}
+
+@(private = "file")
+transform_matrix :: proc(transform: Transform) -> matrix[4, 4]f64
 {
 	DEG :: math.PI / 180
 	r := transform.rotation * DEG
 	rotation := linalg.quaternion_from_euler_angles_f64(r.x, r.y, r.z, .XYZ)
-	model := linalg.matrix4_translate_f64(transform.position) *
+	return linalg.matrix4_translate_f64(transform.position) *
 		linalg.matrix4_from_quaternion_f64(rotation) *
 		linalg.matrix4_scale_f64(transform.scale)
-	append(&g_mesh_draws, Mesh_Draw{mesh, texture, model})
 }
 
 draw_line_3d :: proc(a: Vector3, b: Vector3, color: Color)

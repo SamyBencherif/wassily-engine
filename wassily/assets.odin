@@ -1,72 +1,135 @@
 package wassily
 
+import "core:encoding/json"
+import "core:fmt"
+import "core:math/linalg"
 import "core:log"
-import "core:os"
+import "core:path/filepath"
 import "core:slice"
-import "core:strconv"
 import "core:strings"
 
+import "vendor:cgltf"
 import stbi "vendor:stb/image"
 import vk "vendor:vulkan"
 
-// Loads a Wavefront OBJ (positions, UVs; faces are fan-triangulated). Call from init.
-load_mesh :: proc(path: string) -> Mesh
+// Loads a glTF/GLB file exported by tools/export_gltf.py. Call from init.
+load_model :: proc(path: string) -> Model
 {
-	data, err := os.read_entire_file(path, context.temp_allocator)
-	if err != nil {
-		log.panicf("wassily: could not read mesh %q: %v", path, err)
+	data, result := cgltf.parse_file({}, strings.clone_to_cstring(path, context.temp_allocator))
+	if result != .success {
+		log.panicf("wassily: could not parse model %q: %v", path, result)
+	}
+	defer cgltf.free(data)
+	if result = cgltf.load_buffers({}, data, strings.clone_to_cstring(path, context.temp_allocator)); result != .success {
+		log.panicf("wassily: could not load buffers of model %q: %v", path, result)
 	}
 
-	positions := make([dynamic][3]f32, context.temp_allocator)
-	uvs := make([dynamic][2]f32, context.temp_allocator)
-	vertices := make([dynamic]Vertex3D, context.temp_allocator)
-	indices := make([dynamic]u32, context.temp_allocator)
+	textures := make(map[^cgltf.image]Texture, allocator = context.temp_allocator)
+	model: Model
 
-	text := string(data)
-	for line in strings.split_lines_iterator(&text) {
-		fields := strings.fields(line, context.temp_allocator)
-		if len(fields) == 0 {
+	for &node, i in data.nodes {
+		if node.mesh == nil {
 			continue
 		}
 
-		switch fields[0] {
-		case "v":
-			append(&positions, [3]f32{parse_f32(fields[1]), parse_f32(fields[2]), parse_f32(fields[3])})
-		case "vt":
-			// OBJ puts the UV origin bottom-left; Vulkan samples from top-left.
-			append(&uvs, [2]f32{parse_f32(fields[1]), 1 - parse_f32(fields[2])})
-		case "f":
-			first := u32(len(vertices))
-			for corner in fields[1:] {
-				parts := strings.split(corner, "/", context.temp_allocator)
-				vertex := Vertex3D{color = {1, 1, 1}}
-				vertex.position = positions[obj_index(parts[0], len(positions))]
-				if len(parts) > 1 && parts[1] != "" {
-					vertex.uv = uvs[obj_index(parts[1], len(uvs))]
+		vertices := make([dynamic]Vertex3D, context.temp_allocator)
+		indices := make([dynamic]u32, context.temp_allocator)
+		primitives := make([dynamic]Primitive)
+
+		for &primitive in node.mesh.primitives {
+			if primitive.type != .triangles {
+				log.warnf("wassily: skipping non-triangle primitive in %q", path)
+				continue
+			}
+
+			first_vertex := u32(len(vertices))
+			first_index := u32(len(indices))
+			color, texture := read_material(primitive.material, path, &textures)
+
+			for attribute in primitive.attributes {
+				if attribute.index != 0 {
+					continue
 				}
-				append(&vertices, vertex)
+				#partial switch attribute.type {
+				case .position:
+					resize(&vertices, int(first_vertex) + int(attribute.data.count))
+					positions := make([][3]f32, attribute.data.count, context.temp_allocator)
+					_ = cgltf.accessor_unpack_floats(attribute.data, cast([^]f32)raw_data(positions), attribute.data.count * 3)
+					for p, j in positions {
+						vertices[int(first_vertex) + j].position = p
+						vertices[int(first_vertex) + j].color = color
+					}
+				}
 			}
-			for i in 1 ..< u32(len(fields) - 2) {
-				append(&indices, first, first + i, first + i + 1)
+			// UVs are read after positions so the vertex range exists.
+			for attribute in primitive.attributes {
+				if attribute.type == .texcoord && attribute.index == 0 {
+					uvs := make([][2]f32, attribute.data.count, context.temp_allocator)
+					_ = cgltf.accessor_unpack_floats(attribute.data, cast([^]f32)raw_data(uvs), attribute.data.count * 2)
+					for uv, j in uvs {
+						vertices[int(first_vertex) + j].uv = uv
+					}
+				}
 			}
+
+			vertex_count := u32(len(vertices)) - first_vertex
+			if primitive.indices != nil {
+				count := primitive.indices.count
+				resize(&indices, len(indices) + int(count))
+				_ = cgltf.accessor_unpack_indices(primitive.indices, raw_data(indices[first_index:]), size_of(u32), count)
+				for &index in indices[first_index:] {
+					index += first_vertex
+				}
+			} else {
+				for j in 0 ..< vertex_count {
+					append(&indices, first_vertex + j)
+				}
+			}
+
+			append(&primitives, Primitive{first_index, u32(len(indices)) - first_index, texture})
 		}
+
+		if len(indices) == 0 {
+			delete(primitives)
+			continue
+		}
+
+		world: [16]f32
+		cgltf.node_transform_world(&node, &world[0])
+
+		mesh := Mesh {
+			primitives = primitives[:],
+			local      = linalg.matrix_cast(transmute(matrix[4, 4]f32)world, f64),
+		}
+		mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(vertices[:]), {.VERTEX_BUFFER})
+		mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(indices[:]), {.INDEX_BUFFER})
+		append(&g_meshes, mesh)
+
+		name := strings.clone_from_cstring(node.name) if node.name != nil else fmt.aprintf("node_%v", i)
+		model.objects[name] = mesh
 	}
 
-	mesh: Mesh
-	mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(vertices[:]), {.VERTEX_BUFFER})
-	mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(indices[:]), {.INDEX_BUFFER})
-	mesh.index_count = u32(len(indices))
-	append(&g_meshes, mesh)
+	append(&g_models, model)
+	return model
+}
+
+// Returns the object with the given Blender object name.
+model_mesh :: proc(model: Model, name: string) -> Mesh
+{
+	mesh, ok := model.objects[name]
+	if !ok {
+		names := make([dynamic]string, context.temp_allocator)
+		for key in model.objects {
+			append(&names, key)
+		}
+		log.panicf("wassily: model has no object %q; available: %v", name, names[:])
+	}
 	return mesh
 }
 
 // Loads a PNG/JPG/etc. as an sRGB texture. Call from init.
 load_texture :: proc(path: string) -> Texture
 {
-	if len(g_textures) >= MAX_TEXTURES {
-		log.panicf("wassily: more than %v textures loaded", MAX_TEXTURES)
-	}
-
 	width, height, channels: i32
 	pixels := stbi.load(strings.clone_to_cstring(path, context.temp_allocator), &width, &height, &channels, 4)
 	if pixels == nil {
@@ -74,9 +137,78 @@ load_texture :: proc(path: string) -> Texture
 	}
 	defer stbi.image_free(pixels)
 
+	return create_texture(u32(width), u32(height), pixels[:width * height * 4])
+}
+
+@(private = "file")
+read_material :: proc(material: ^cgltf.material, path: string, textures: ^map[^cgltf.image]Texture) -> (color: [3]f32, texture: Texture)
+{
+	color = {1, 1, 1}
+	if material == nil {
+		return color, white_texture()
+	}
+
+	if material.extras.data != nil {
+		Extras :: struct {
+			wassily_color: [3]f32,
+		}
+		extras := Extras{color}
+		text := string(cstring(rawptr(material.extras.data)))
+		if json.unmarshal(transmute([]byte)text, &extras, allocator = context.temp_allocator) == nil {
+			color = extras.wassily_color
+		}
+	}
+
+	view := material.pbr_metallic_roughness.base_color_texture
+	if !material.has_pbr_metallic_roughness || view.texture == nil || view.texture.image_ == nil {
+		return color, white_texture()
+	}
+
+	image := view.texture.image_
+	if cached, ok := textures[image]; ok {
+		return color, cached
+	}
+
+	if image.buffer_view != nil {
+		bytes := cgltf.buffer_view_data(image.buffer_view)
+		width, height, channels: i32
+		pixels := stbi.load_from_memory(bytes, i32(image.buffer_view.size), &width, &height, &channels, 4)
+		if pixels == nil {
+			log.panicf("wassily: could not decode texture in %q: %s", path, stbi.failure_reason())
+		}
+		defer stbi.image_free(pixels)
+		texture = create_texture(u32(width), u32(height), pixels[:width * height * 4])
+	} else {
+		uri_path, _ := filepath.join({filepath.dir(path), string(image.uri)}, context.temp_allocator)
+		texture = load_texture(uri_path)
+	}
+
+	textures[image] = texture
+	return color, texture
+}
+
+@(private = "file")
+white_texture :: proc() -> Texture
+{
+	if texture, ok := g_white_texture.?; ok {
+		return texture
+	}
+	pixels := [4]byte{255, 255, 255, 255}
+	texture := create_texture(1, 1, pixels[:])
+	g_white_texture = texture
+	return texture
+}
+
+@(private = "file")
+create_texture :: proc(width, height: u32, pixels: []byte) -> Texture
+{
+	if len(g_textures) >= MAX_TEXTURES {
+		log.panicf("wassily: more than %v textures loaded", MAX_TEXTURES)
+	}
+
 	texture: Texture
-	texture.image, texture.memory = create_image(u32(width), u32(height), .R8G8B8A8_SRGB, {.TRANSFER_DST, .SAMPLED})
-	upload_texture_pixels(texture.image, u32(width), u32(height), pixels[:width * height * 4])
+	texture.image, texture.memory = create_image(width, height, .R8G8B8A8_SRGB, {.TRANSFER_DST, .SAMPLED})
+	upload_texture_pixels(texture.image, width, height, pixels)
 	texture.view = create_image_view(texture.image, .R8G8B8A8_SRGB, {.COLOR})
 
 	alloc_info := vk.DescriptorSetAllocateInfo {
@@ -119,24 +251,16 @@ destroy_assets :: proc()
 		vk.DestroyImage(g_device, texture.image, nil)
 		vk.FreeMemory(g_device, texture.memory, nil)
 	}
-	delete(g_meshes)
-	delete(g_textures)
-}
-
-@(private = "file")
-parse_f32 :: proc(s: string) -> f32
-{
-	value, _ := strconv.parse_f32(s)
-	return value
-}
-
-// OBJ indices are 1-based; negative values count back from the end.
-@(private = "file")
-obj_index :: proc(s: string, count: int) -> int
-{
-	i, ok := strconv.parse_int(s)
-	if !ok || i == 0 || abs(i) > count {
-		log.panicf("wassily: bad OBJ index %q", s)
+	for mesh in g_meshes {
+		delete(mesh.primitives)
 	}
-	return i - 1 if i > 0 else count + i
+	for &model in g_models {
+		for name in model.objects {
+			delete(name)
+		}
+		delete(model.objects)
+	}
+	delete(g_meshes)
+	delete(g_models)
+	delete(g_textures)
 }
