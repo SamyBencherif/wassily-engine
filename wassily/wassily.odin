@@ -8,9 +8,11 @@ import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:slice"
+import "core:strings"
 import "core:log"
 
 import "vendor:glfw"
+import easy_font "vendor:stb/easy_font"
 import vk "vendor:vulkan"
 
 Vertex2D :: struct {
@@ -137,6 +139,7 @@ Key :: enum i32 {
 	S      = glfw.KEY_S,
 	W      = glfw.KEY_W,
 	Space  = glfw.KEY_SPACE,
+	Enter  = glfw.KEY_ENTER,
 	Escape = glfw.KEY_ESCAPE,
 	Shift  = glfw.KEY_LEFT_SHIFT,
 	Up     = glfw.KEY_UP,
@@ -148,6 +151,70 @@ Key :: enum i32 {
 is_down :: proc(key: Key) -> bool
 {
 	return glfw.GetKey(g_window, i32(key)) == glfw.PRESS
+}
+
+Gamepad_Button :: enum i32 {
+	A         = glfw.GAMEPAD_BUTTON_A,
+	B         = glfw.GAMEPAD_BUTTON_B,
+	Start     = glfw.GAMEPAD_BUTTON_START,
+	Dpad_Up   = glfw.GAMEPAD_BUTTON_DPAD_UP,
+	Dpad_Down = glfw.GAMEPAD_BUTTON_DPAD_DOWN,
+}
+
+@(private)
+Input_State :: struct {
+	keys: #sparse[Key]bool,
+	buttons: #sparse[Gamepad_Button]bool,
+	mouse_left: bool,
+}
+
+@(private)
+g_input, g_input_prev: Input_State
+
+@(private)
+poll_input :: proc()
+{
+	g_input_prev = g_input
+	for key in Key {
+		g_input.keys[key] = glfw.GetKey(g_window, i32(key)) == glfw.PRESS
+	}
+	pad, has_pad := first_gamepad()
+	for button in Gamepad_Button {
+		g_input.buttons[button] = has_pad && pad.buttons[i32(button)] == glfw.PRESS
+	}
+	g_input.mouse_left = glfw.GetMouseButton(g_window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+}
+
+// True only on the frame the key goes down.
+is_pressed :: proc(key: Key) -> bool
+{
+	return g_input.keys[key] && !g_input_prev.keys[key]
+}
+
+// True only on the frame the button goes down, on the first connected gamepad.
+is_gamepad_pressed :: proc(button: Gamepad_Button) -> bool
+{
+	return g_input.buttons[button] && !g_input_prev.buttons[button]
+}
+
+// True only on the frame the left mouse button goes down.
+is_mouse_pressed :: proc() -> bool
+{
+	return g_input.mouse_left && !g_input_prev.mouse_left
+}
+
+// Cursor position in the WIDTH x HEIGHT canvas used by 2D drawing.
+mouse_position :: proc() -> [2]f64
+{
+	x, y := glfw.GetCursorPos(g_window)
+	w, h := glfw.GetWindowSize(g_window)
+	return {x / f64(max(w, 1)) * WIDTH, y / f64(max(h, 1)) * HEIGHT}
+}
+
+// Closes the window after the current frame.
+quit :: proc()
+{
+	glfw.SetWindowShouldClose(g_window, true)
 }
 
 // Windowed position and size to restore when leaving fullscreen.
@@ -188,6 +255,50 @@ fill_circle :: proc(x: int, y: int, radius: int, color: Color)
         append(&g_vertices, Vertex2D{{cx + rx * math.cos(a0), cy + ry * math.sin(a0)}, c})
         append(&g_vertices, Vertex2D{{cx + rx * math.cos(a1), cy + ry * math.sin(a1)}, c})
     }
+}
+
+// Same canvas as fill_circle.
+fill_rect :: proc(x, y, w, h: int, color: Color)
+{
+	push_quad({f64(x), f64(y)}, {f64(x + w), f64(y + h)}, color)
+}
+
+// Built-in segment font (ASCII only); glyphs are about 7 * scale pixels tall.
+draw_text :: proc(x, y: int, text: string, scale: f64, color: Color)
+{
+	text := printable_ascii(text)
+	quads := make([]easy_font.Quad, len(text) * 32, context.temp_allocator)
+	n := easy_font.print(f32(x), f32(y), text, {255, 255, 255, 255}, quads, f32(scale))
+	for q in quads[:n] {
+		push_quad(linalg.array_cast(q.tl.v.xy, f64), linalg.array_cast(q.br.v.xy, f64), color)
+	}
+}
+
+text_width :: proc(text: string, scale: f64) -> int
+{
+	return int(f64(easy_font.width(printable_ascii(text))) * scale)
+}
+
+// easy_font indexes its glyph table without bounds checks, so other bytes become '?'.
+@(private = "file")
+printable_ascii :: proc(text: string) -> string
+{
+	bytes := transmute([]u8)strings.clone(text, context.temp_allocator)
+	for &b in bytes {
+		if b != '\n' && (b < 32 || b > 126) { b = '?' }
+	}
+	return string(bytes)
+}
+
+@(private = "file")
+push_quad :: proc(tl, br: [2]f64, color: Color)
+{
+	to_clip :: proc(p: [2]f64) -> [2]f32 {
+		return {f32(p.x / WIDTH * 2 - 1), f32(p.y / HEIGHT * 2 - 1)}
+	}
+	c := linalg.array_cast(color / 255, f32)
+	a, b, d, e := to_clip(tl), to_clip({br.x, tl.y}), to_clip(br), to_clip({tl.x, br.y})
+	append(&g_vertices, Vertex2D{a, c}, Vertex2D{b, c}, Vertex2D{d, c}, Vertex2D{a, c}, Vertex2D{d, c}, Vertex2D{e, c})
 }
 
 camera :: proc(position: Vector3, target: Vector3, up: Vector3, fov: f64)
@@ -581,6 +692,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 		free_all(context.temp_allocator)
 
 		glfw.PollEvents()
+		poll_input()
 
 		now := glfw.GetTime()
 		g_dt = now - last_time

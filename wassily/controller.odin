@@ -122,7 +122,7 @@ resolve_collisions :: proc(c: ^First_Person_Controller, collider: []Triangle) ->
 }
 
 // Returns the state of the first connected gamepad, if any.
-@(private="file")
+@(private)
 first_gamepad :: proc() -> (state: glfw.GamepadState, ok: bool)
 {
 	for jid in glfw.JOYSTICK_1 ..= glfw.JOYSTICK_LAST {
@@ -144,18 +144,22 @@ apply_deadzone :: proc(x, y: f32, deadzone: f64) -> [2]f64
 }
 
 // Call once per frame from the loop: handles mouse/right-stick look, WASD/left-stick movement and sets the camera.
-// Click to capture the mouse, Escape to release it. Uses the first connected gamepad.
+// Grabs (hidden, unbounded) or releases the mouse used for looking around.
+set_mouse_captured :: proc(c: ^First_Person_Controller, captured: bool)
+{
+	glfw.SetInputMode(g_window, glfw.CURSOR, glfw.CURSOR_DISABLED if captured else glfw.CURSOR_NORMAL)
+	if captured {
+		c.last_cursor.x, c.last_cursor.y = glfw.GetCursorPos(g_window)
+	}
+	c.captured = captured
+}
+
+// Click to capture the mouse; release it with set_mouse_captured. Uses the first connected gamepad.
 // collider is in world space (e.g. Model.collider drawn with an identity transform); nil walks on the y=0 plane.
 update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []Triangle = nil)
 {
 	if !c.captured && glfw.GetMouseButton(g_window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS {
-		glfw.SetInputMode(g_window, glfw.CURSOR, glfw.CURSOR_DISABLED)
-		c.last_cursor.x, c.last_cursor.y = glfw.GetCursorPos(g_window)
-		c.captured = true
-	}
-	if c.captured && is_down(.Escape) {
-		glfw.SetInputMode(g_window, glfw.CURSOR, glfw.CURSOR_NORMAL)
-		c.captured = false
+		set_mouse_captured(c, true)
 	}
 
 	if c.captured {
