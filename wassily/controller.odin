@@ -5,7 +5,7 @@ import "core:math/linalg"
 
 import "vendor:glfw"
 
-// Walks on the y=0 plane; yaw/pitch in degrees, yaw 0 faces +Z.
+// Walks on the y=0 plane and can jump off it (Space / gamepad A); yaw/pitch in degrees, yaw 0 faces +Z.
 First_Person_Controller :: struct {
 	position: Vector3,
 	yaw: f64,
@@ -16,6 +16,9 @@ First_Person_Controller :: struct {
 	look_speed: f64,  // degrees per second at full right-stick deflection
 	deadzone: f64,    // gamepad stick deadzone, 0..1
 	fov: f64,
+	jump_speed: f64, // initial upward velocity, units per second
+	gravity: f64,    // units per second squared
+	velocity_y: f64,
 	captured: bool,
 	last_cursor: [2]f64,
 }
@@ -31,6 +34,8 @@ first_person_controller :: proc(position: Vector3 = {0, 0, 0}, yaw: f64 = 0) -> 
 		look_speed  = 120,
 		deadzone    = 0.15,
 		fov         = 60,
+		jump_speed  = 5,
+		gravity     = 9.81 * 1.5,
 	}
 }
 
@@ -106,7 +111,18 @@ update_first_person_controller :: proc(c: ^First_Person_Controller)
 		move /= l
 	}
 	c.position += move * c.speed * dt()
-	c.position.y = 0
+
+	grounded := c.position.y <= 0
+	jump := is_down(.Space) || (has_pad && pad.buttons[glfw.GAMEPAD_BUTTON_A] == glfw.PRESS)
+	if grounded && jump {
+		c.velocity_y = c.jump_speed
+	}
+	c.velocity_y -= c.gravity * dt()
+	c.position.y += c.velocity_y * dt()
+	if c.position.y <= 0 {
+		c.position.y = 0
+		c.velocity_y = 0
+	}
 
 	eye := c.position + Vector3{0, c.eye_height, 0}
 	look := Vector3{math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch)}
