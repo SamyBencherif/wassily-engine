@@ -9,7 +9,7 @@ player : wassily.First_Person_Controller
 
 init :: proc()
 {
-    mesh = wassily.load_mesh("assets/room.obj")
+    mesh = wassily.load_mesh("assets/world.obj")
     tex  = wassily.load_texture("assets/radial-wall.png")
 
     player = wassily.first_person_controller({0, 0, 0}, 210)
@@ -25,12 +25,6 @@ loop :: proc()
 
     transform := wassily.Transform{cube_pos, cube_rot, cube_sca}
     wassily.draw_mesh(mesh, transform, tex)
-    
-    a := wassily.Vector3{3, 3, 3}
-    b := wassily.Vector3{5, 5, 5}
-    color := wassily.Color{255, 100, 100}
-
-    wassily.draw_line_3d(a, b, color) 
 }
 
 main :: proc() 
