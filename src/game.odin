@@ -12,7 +12,7 @@ init :: proc()
     mesh = wassily.load_mesh("assets/room.obj")
     tex  = wassily.load_texture("assets/radial-wall.png")
 
-    player = wassily.first_person_controller({0, 0, -10})
+    player = wassily.first_person_controller({0, 0, 0}, 210)
 }
 
 loop :: proc() 
