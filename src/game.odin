@@ -5,47 +5,19 @@ import "core:math"
 
 mesh : wassily.Mesh
 tex: wassily.Texture
-cam_pos : wassily.Vector3
+player : wassily.First_Person_Controller
 
 init :: proc()
 {
     mesh = wassily.load_mesh("assets/room.obj")
     tex  = wassily.load_texture("assets/radial-wall.png")
 
-    cam_pos = wassily.Vector3{0, 0, -10}
+    player = wassily.first_person_controller({0, 0, -10})
 }
 
 loop :: proc() 
 {
-    w, h := wassily.size()
-
-    cam_up := wassily.Vector3{0, 1, 0}
-    cam_fov : f64 = 60
-    cam_speed : f64 = 5 // units per second
-
-    if wassily.is_down(.W)
-    {
-        cam_pos += wassily.Vector3{0, 0, 1} * cam_speed * wassily.dt()
-    }
-
-    if wassily.is_down(.S)
-    {
-        cam_pos += wassily.Vector3{0, 0, -1} * cam_speed * wassily.dt()
-    }
-
-    if wassily.is_down(.A)
-    {
-        cam_pos += wassily.Vector3{1, 0, 0} * cam_speed * wassily.dt()
-    }
-
-    if wassily.is_down(.D)
-    {
-        cam_pos += wassily.Vector3{-1, 0, 0} * cam_speed * wassily.dt()
-    }
-
-    cam_target := cam_pos + wassily.Vector3{0, 0, 1}
-
-    wassily.camera(cam_pos, cam_target, cam_up, cam_fov)
+    wassily.update_first_person_controller(&player)
 
     cube_pos := wassily.Vector3{0, 0, 0}
     cube_rot := wassily.Vector3{0, 0, 0}
