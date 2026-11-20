@@ -87,6 +87,13 @@ Mesh_Draw :: struct {
 	mesh: Mesh,
 	texture_override: Maybe(Texture),
 	model: matrix[4, 4]f64,
+	tint: Color,
+}
+
+// Mesh pipeline push constants; must match mesh.vert.
+Mesh_Push :: struct {
+	mvp: matrix[4, 4]f32,
+	tint: [4]f32,
 }
 
 Camera :: struct {
@@ -102,6 +109,8 @@ MAX_TEXTURES :: 64
 
 g_camera := Camera{position = {0, 0, -10}, target = {0, 0, 0}, up = {0, 1, 0}, fov = 60}
 g_mesh_draws: [dynamic]Mesh_Draw
+// Keyed by vertex buffer, which uniquely identifies a mesh. Cleared every frame.
+g_color_overrides: map[vk.Buffer]Color
 g_line_vertices: [dynamic]LineVertex
 g_line_stream: Vertex_Stream
 g_meshes: [dynamic]Mesh
@@ -306,10 +315,17 @@ camera :: proc(position: Vector3, target: Vector3, up: Vector3, fov: f64)
 	g_camera = {position, target, up, fov}
 }
 
+// Tints the named object for draws later in this frame only; multiplies its material color.
+set_color :: proc(model: Model, name: string, color: Color)
+{
+	g_color_overrides[model_mesh(model, name).vertex_buffer] = color
+}
+
 // texture_override replaces every primitive's own material texture.
 draw_mesh :: proc(mesh: Mesh, transform: Transform, texture_override: Maybe(Texture) = nil)
 {
-	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * mesh.local})
+	tint := g_color_overrides[mesh.vertex_buffer] or_else Color{255, 255, 255}
+	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * mesh.local, tint})
 }
 
 draw_model :: proc(model: Model, transform: Transform, texture_override: Maybe(Texture) = nil)
@@ -610,7 +626,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 			cull        = {.BACK},
 			front_face  = .COUNTER_CLOCKWISE,
 			depth       = true,
-			push_size   = size_of(matrix[4, 4]f32),
+			push_size   = size_of(Mesh_Push),
 			set_layouts = {g_descriptor_set_layout},
 		})
 
@@ -681,6 +697,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 	defer destroy_vertex_stream(&g_line_stream)
 	defer delete(g_line_vertices)
 	defer delete(g_mesh_draws)
+	defer delete(g_color_overrides)
 
 	initfn()
 	free_all(context.temp_allocator)
@@ -725,6 +742,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 		clear(&g_vertices)
 		clear(&g_line_vertices)
 		clear(&g_mesh_draws)
+		clear(&g_color_overrides)
 		loopfn()
 		upload_vertex_stream(&g_vertex_stream, current_frame, g_vertices[:])
 		upload_vertex_stream(&g_line_stream, current_frame, g_line_vertices[:])

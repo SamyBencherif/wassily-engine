@@ -2,6 +2,7 @@
 
 layout(push_constant) uniform Push {
     mat4 mvp;
+    vec4 tint;
 } push;
 
 layout(location = 0) in vec3 inPosition;
@@ -14,5 +15,5 @@ layout(location = 1) out vec3 fragColor;
 void main() {
     gl_Position = push.mvp * vec4(inPosition, 1.0);
     fragUV = inUV;
-    fragColor = inColor;
+    fragColor = inColor * push.tint.rgb;
 }

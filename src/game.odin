@@ -2,6 +2,7 @@ package game
 
 import "../wassily"
 import "core:fmt"
+import "core:math"
 import "core:path/filepath"
 import "core:strings"
 
@@ -74,11 +75,32 @@ loop :: proc()
         update_menu()
     }
 
-    wassily.draw_model(worlds[current].model, wassily.Transform{scale = {1, 1, 1}})
+    model := worlds[current].model
+    if "Cube.003" in model.objects {
+        wassily.set_color(model, "Cube.003", rainbow(wassily.time() * 0.25))
+    }
+    wassily.draw_model(model, wassily.Transform{scale = {1, 1, 1}})
 
     if menu != .None {
         draw_menu()
     }
+}
+
+// Hue in turns (wraps every 1.0), full saturation and value.
+rainbow :: proc(hue: f64) -> wassily.Color
+{
+    h := math.mod(hue, 1) * 6
+    x := 1 - abs(math.mod(h, 2) - 1)
+    rgb: [3]f64
+    switch int(h) {
+    case 0: rgb = {1, x, 0}
+    case 1: rgb = {x, 1, 0}
+    case 2: rgb = {0, 1, x}
+    case 3: rgb = {0, x, 1}
+    case 4: rgb = {x, 0, 1}
+    case:   rgb = {1, 0, x}
+    }
+    return rgb * 255
 }
 
 PAUSE_ITEMS := []string{"Resume", "Worlds", "Quit"}
