@@ -79,6 +79,9 @@ loop :: proc()
     if "Cube.003" in model.objects {
         wassily.set_color(model, "Cube.003", rainbow(wassily.time() * 0.25))
     }
+    if "MovingPlatform" in model.objects {
+        wassily.set_position(model, "MovingPlatform", ping_pong(PLATFORM_A, PLATFORM_B, wassily.time() * 0.06))
+    }
     wassily.draw_model(model, wassily.Transform{scale = {1, 1, 1}})
 
     if menu != .None {
@@ -101,6 +104,17 @@ rainbow :: proc(hue: f64) -> wassily.Color
     case:   rgb = {1, 0, x}
     }
     return rgb * 255
+}
+
+// Blender <x, y, z> is glTF/Y-up <x, z, -y>.
+PLATFORM_A :: wassily.Vector3{-17.443, 4.86542, 0}
+PLATFORM_B :: wassily.Vector3{-30.323, 4.86542, 0}
+
+// Eases from a to b and back once per 1.0 of t.
+ping_pong :: proc(a, b: wassily.Vector3, t: f64) -> wassily.Vector3
+{
+    k := (1 - math.cos(t * math.TAU)) / 2
+    return a + (b - a) * k
 }
 
 PAUSE_ITEMS := []string{"Resume", "Worlds", "Quit"}

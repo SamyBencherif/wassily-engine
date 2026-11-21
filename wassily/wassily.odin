@@ -111,6 +111,7 @@ g_camera := Camera{position = {0, 0, -10}, target = {0, 0, 0}, up = {0, 1, 0}, f
 g_mesh_draws: [dynamic]Mesh_Draw
 // Keyed by vertex buffer, which uniquely identifies a mesh. Cleared every frame.
 g_color_overrides: map[vk.Buffer]Color
+g_position_overrides: map[vk.Buffer]Vector3
 g_line_vertices: [dynamic]LineVertex
 g_line_stream: Vertex_Stream
 g_meshes: [dynamic]Mesh
@@ -321,11 +322,21 @@ set_color :: proc(model: Model, name: string, color: Color)
 	g_color_overrides[model_mesh(model, name).vertex_buffer] = color
 }
 
+// Moves the named object's origin to position (model space, Y-up) for draws later in this frame only.
+set_position :: proc(model: Model, name: string, position: Vector3)
+{
+	g_position_overrides[model_mesh(model, name).vertex_buffer] = position
+}
+
 // texture_override replaces every primitive's own material texture.
 draw_mesh :: proc(mesh: Mesh, transform: Transform, texture_override: Maybe(Texture) = nil)
 {
 	tint := g_color_overrides[mesh.vertex_buffer] or_else Color{255, 255, 255}
-	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * mesh.local, tint})
+	local := mesh.local
+	if position, ok := g_position_overrides[mesh.vertex_buffer]; ok {
+		local[0, 3], local[1, 3], local[2, 3] = position.x, position.y, position.z
+	}
+	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * local, tint})
 }
 
 draw_model :: proc(model: Model, transform: Transform, texture_override: Maybe(Texture) = nil)
@@ -698,6 +709,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 	defer delete(g_line_vertices)
 	defer delete(g_mesh_draws)
 	defer delete(g_color_overrides)
+	defer delete(g_position_overrides)
 
 	initfn()
 	free_all(context.temp_allocator)
@@ -743,6 +755,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 		clear(&g_line_vertices)
 		clear(&g_mesh_draws)
 		clear(&g_color_overrides)
+		clear(&g_position_overrides)
 		loopfn()
 		upload_vertex_stream(&g_vertex_stream, current_frame, g_vertices[:])
 		upload_vertex_stream(&g_line_stream, current_frame, g_line_vertices[:])
