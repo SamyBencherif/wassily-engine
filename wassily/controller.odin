@@ -23,6 +23,9 @@ First_Person_Controller :: struct {
 	max_slope: f64,  // steepest walkable surface, degrees from horizontal
 	grounded: bool,
 	captured: bool,
+	// Flies along the view direction through geometry; Space / gamepad A rises, Shift / gamepad B sinks.
+	noclip: bool,
+	fly_speed: f64,
 	last_cursor: [2]f64,
 }
 
@@ -41,6 +44,7 @@ first_person_controller :: proc(position: Vector3 = {0, 0, 0}, yaw: f64 = 0) -> 
 		gravity     = 9.81 * 1.5,
 		radius      = 0.3,
 		max_slope   = 60,
+		fly_speed   = 15,
 	}
 }
 
@@ -181,8 +185,9 @@ update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []
 
 	yaw := c.yaw * math.PI / 180
 	pitch := c.pitch * math.PI / 180
-	forward := Vector3{math.sin(yaw), 0, math.cos(yaw)}
-	right := Vector3{-forward.z, 0, forward.x}
+	look := Vector3{math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch)}
+	forward := look if c.noclip else Vector3{math.sin(yaw), 0, math.cos(yaw)}
+	right := linalg.normalize(Vector3{-math.cos(yaw), 0, math.sin(yaw)})
 
 	move: Vector3
 	if is_down(.W) { move += forward }
@@ -199,6 +204,19 @@ update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []
 	}
 
 	jump := is_down(.Space) || (has_pad && pad.buttons[glfw.GAMEPAD_BUTTON_A] == glfw.PRESS)
+
+	if c.noclip {
+		if jump { move.y += 1 }
+		if is_down(.Shift) || (has_pad && pad.buttons[glfw.GAMEPAD_BUTTON_B] == glfw.PRESS) { move.y -= 1 }
+		if l := linalg.length(move); l > 1 { move /= l }
+		c.position += move * c.fly_speed * dt()
+		c.velocity_y = 0
+		c.grounded = false
+		eye := c.position + Vector3{0, c.eye_height, 0}
+		camera(eye, eye + look, {0, 1, 0}, c.fov)
+		return
+	}
+
 	if c.grounded && jump {
 		c.velocity_y = c.jump_speed
 	}
@@ -237,6 +255,5 @@ update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []
 	}
 
 	eye := c.position + Vector3{0, c.eye_height, 0}
-	look := Vector3{math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch)}
 	camera(eye, eye + look, {0, 1, 0}, c.fov)
 }

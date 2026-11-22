@@ -18,6 +18,9 @@ Menu :: enum {
     Worlds,
 }
 
+// Set by `make editor`: the camera flies freely through the world.
+EDITOR :: #config(EDITOR, false)
+
 worlds : [dynamic]World
 current : int
 player : wassily.First_Person_Controller
@@ -36,6 +39,7 @@ init :: proc()
     }
 
     player = wassily.first_person_controller()
+    player.noclip = EDITOR
     respawn()
 }
 
@@ -68,7 +72,7 @@ loop :: proc()
             open_menu(.Pause)
         } else {
             wassily.update_first_person_controller(&player, worlds[current].model.collider)
-            if player.position.y < -40 {
+            if !player.noclip && player.position.y < -40 {
                 respawn()
             }
         }
