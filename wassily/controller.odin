@@ -22,6 +22,8 @@ First_Person_Controller :: struct {
 	radius: f64,    // body is a stack of spheres from the feet up to eye height
 	max_slope: f64,  // steepest walkable surface, degrees from horizontal
 	grounded: bool,
+	// Index into the collider of the triangle stood on last update, or -1.
+	ground_triangle: int,
 	captured: bool,
 	// Flies along the view direction through geometry; Space / gamepad A rises, Shift / gamepad B sinks.
 	noclip: bool,
@@ -45,6 +47,7 @@ first_person_controller :: proc(position: Vector3 = {0, 0, 0}, yaw: f64 = 0) -> 
 		radius      = 0.3,
 		max_slope   = 60,
 		fly_speed   = 15,
+		ground_triangle = -1,
 	}
 }
 
@@ -86,7 +89,7 @@ resolve_collisions :: proc(c: ^First_Person_Controller, collider: []Triangle) ->
 	for _ in 0 ..< 3 {
 		lo := c.position - r
 		hi := c.position + Vector3{r, c.eye_height + r, r}
-		for t in collider {
+		for t, ti in collider {
 			if max(t[0].x, t[1].x, t[2].x) < lo.x || min(t[0].x, t[1].x, t[2].x) > hi.x ||
 			   max(t[0].y, t[1].y, t[2].y) < lo.y || min(t[0].y, t[1].y, t[2].y) > hi.y ||
 			   max(t[0].z, t[1].z, t[2].z) < lo.z || min(t[0].z, t[1].z, t[2].z) > hi.z {
@@ -113,6 +116,7 @@ resolve_collisions :: proc(c: ^First_Person_Controller, collider: []Triangle) ->
 				if n.y >= min_ground_ny {
 					c.position.y += depth / n.y
 					grounded = true
+					c.ground_triangle = ti
 					if c.velocity_y < 0 { c.velocity_y = 0 }
 				} else {
 					c.position += n * depth
@@ -212,6 +216,7 @@ update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []
 		c.position += move * c.fly_speed * dt()
 		c.velocity_y = 0
 		c.grounded = false
+		c.ground_triangle = -1
 		eye := c.position + Vector3{0, c.eye_height, 0}
 		camera(eye, eye + look, {0, 1, 0}, c.fov)
 		return
@@ -223,6 +228,7 @@ update_first_person_controller :: proc(c: ^First_Person_Controller, collider: []
 	c.velocity_y -= c.gravity * dt()
 
 	horizontal := move * c.speed * dt()
+	c.ground_triangle = -1
 	if collider == nil {
 		c.position += horizontal + Vector3{0, c.velocity_y * dt(), 0}
 		c.grounded = c.position.y <= 0

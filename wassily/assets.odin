@@ -128,9 +128,17 @@ load_model :: proc(path: string) -> Model
 			continue
 		}
 
+		triangles := make([]Triangle, len(indices) / 3)
+		for &triangle, t in triangles {
+			for k in 0 ..< 3 {
+				triangle[k] = linalg.array_cast(vertices[indices[t * 3 + k]].position, f64)
+			}
+		}
+
 		mesh := Mesh {
 			primitives = primitives[:],
 			local      = local,
+			triangles  = triangles,
 		}
 		mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(vertices[:]), {.VERTEX_BUFFER})
 		mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(indices[:]), {.INDEX_BUFFER})
@@ -285,6 +293,7 @@ destroy_assets :: proc()
 	}
 	for mesh in g_meshes {
 		delete(mesh.primitives)
+		delete(mesh.triangles)
 	}
 	for &model in g_models {
 		for name in model.objects {

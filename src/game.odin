@@ -50,6 +50,9 @@ respawn :: proc()
     player.yaw = spawn.yaw
     player.pitch = 0
     player.velocity_y = 0
+    player.grounded = false
+    player.ground_triangle = -1
+    platform_prev = nil
 }
 
 open_menu :: proc(m: Menu)
@@ -67,11 +70,31 @@ close_menu :: proc()
 
 loop :: proc() 
 {
+    model := worlds[current].model
+    collider := model.collider
+
+    if "MovingPlatform" in model.objects {
+        position := ping_pong(PLATFORM_A, PLATFORM_B, wassily.time() * 0.06)
+        wassily.set_position(model, "MovingPlatform", position)
+
+        // Platform triangles come after the world's, so a ground index past them means the player stands on it.
+        on_platform := player.grounded && player.ground_triangle >= len(model.collider)
+        if prev, ok := platform_prev.?; ok && on_platform {
+            player.position += position - prev
+        }
+        platform_prev = position
+
+        combined := make([dynamic]wassily.Triangle, context.temp_allocator)
+        append(&combined, ..model.collider)
+        append(&combined, ..wassily.object_collider(model, "MovingPlatform"))
+        collider = combined[:]
+    }
+
     if menu == .None {
         if wassily.is_pressed(.Escape) || wassily.is_gamepad_pressed(.Start) {
             open_menu(.Pause)
         } else {
-            wassily.update_first_person_controller(&player, worlds[current].model.collider)
+            wassily.update_first_person_controller(&player, collider)
             if !player.noclip && player.position.y < -40 {
                 respawn()
             }
@@ -80,12 +103,9 @@ loop :: proc()
         update_menu()
     }
 
-    model := worlds[current].model
+    model = worlds[current].model
     if "Cube.003" in model.objects {
         wassily.set_color(model, "Cube.003", rainbow(wassily.time() * 0.25))
-    }
-    if "MovingPlatform" in model.objects {
-        wassily.set_position(model, "MovingPlatform", ping_pong(PLATFORM_A, PLATFORM_B, wassily.time() * 0.06))
     }
     if origin, ok := model.markers["_fire"]; ok {
         if menu == .None { update_fire(origin) }
@@ -120,6 +140,8 @@ rainbow :: proc(hue: f64) -> wassily.Color
 // Blender <x, y, z> is glTF/Y-up <x, z, -y>.
 PLATFORM_A :: wassily.Vector3{-17.443, 4.86542, 0}
 PLATFORM_B :: wassily.Vector3{-30.323, 4.86542, 0}
+
+platform_prev : Maybe(wassily.Vector3)
 
 // Eases from a to b and back once per 1.0 of t.
 ping_pong :: proc(a, b: wassily.Vector3, t: f64) -> wassily.Vector3

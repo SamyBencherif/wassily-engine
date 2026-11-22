@@ -65,6 +65,8 @@ Mesh :: struct {
 	primitives: []Primitive,
 	// Object placement from the source file, applied before the draw transform.
 	local: matrix[4, 4]f64,
+	// In the mesh's own space, before local.
+	triangles: []Triangle,
 }
 
 Triangle :: [3]Vector3
@@ -352,15 +354,36 @@ set_position :: proc(model: Model, name: string, position: Vector3)
 	g_position_overrides[model_mesh(model, name).vertex_buffer] = position
 }
 
-// texture_override replaces every primitive's own material texture.
-draw_mesh :: proc(mesh: Mesh, transform: Transform, texture_override: Maybe(Texture) = nil)
+// The named object's triangles in model space this frame (honoring set_position), for adding to a collider.
+// Allocated with the temp allocator.
+object_collider :: proc(model: Model, name: string) -> []Triangle
 {
-	tint := g_color_overrides[mesh.vertex_buffer] or_else Color{255, 255, 255}
+	mesh := model_mesh(model, name)
+	local := mesh_local(mesh)
+	triangles := make([]Triangle, len(mesh.triangles), context.temp_allocator)
+	for t, i in mesh.triangles {
+		for p, k in t {
+			triangles[i][k] = (local * [4]f64{p.x, p.y, p.z, 1}).xyz
+		}
+	}
+	return triangles
+}
+
+@(private = "file")
+mesh_local :: proc(mesh: Mesh) -> matrix[4, 4]f64
+{
 	local := mesh.local
 	if position, ok := g_position_overrides[mesh.vertex_buffer]; ok {
 		local[0, 3], local[1, 3], local[2, 3] = position.x, position.y, position.z
 	}
-	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * local, tint})
+	return local
+}
+
+// texture_override replaces every primitive's own material texture.
+draw_mesh :: proc(mesh: Mesh, transform: Transform, texture_override: Maybe(Texture) = nil)
+{
+	tint := g_color_overrides[mesh.vertex_buffer] or_else Color{255, 255, 255}
+	append(&g_mesh_draws, Mesh_Draw{mesh, texture_override, transform_matrix(transform) * mesh_local(mesh), tint})
 }
 
 draw_model :: proc(model: Model, transform: Transform, texture_override: Maybe(Texture) = nil)
