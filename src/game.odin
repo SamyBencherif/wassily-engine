@@ -3,6 +3,7 @@ package game
 import "../wassily"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:path/filepath"
 import "core:strings"
 
@@ -82,6 +83,12 @@ loop :: proc()
     if "MovingPlatform" in model.objects {
         wassily.set_position(model, "MovingPlatform", ping_pong(PLATFORM_A, PLATFORM_B, wassily.time() * 0.06))
     }
+    if origin, ok := model.markers["_fire"]; ok {
+        if menu == .None { update_fire(origin) }
+        draw_fire(origin)
+    } else {
+        clear(&fire)
+    }
     wassily.draw_model(model, wassily.Transform{scale = {1, 1, 1}})
 
     if menu != .None {
@@ -115,6 +122,73 @@ ping_pong :: proc(a, b: wassily.Vector3, t: f64) -> wassily.Vector3
 {
     k := (1 - math.cos(t * math.TAU)) / 2
     return a + (b - a) * k
+}
+
+Particle :: struct {
+    position: wassily.Vector3,
+    velocity: wassily.Vector3,
+    age, lifetime, size: f64,
+}
+
+FIRE_RATE      :: 120.0
+FIRE_RADIUS    :: 0.35
+FIRE_LIGHT_BOX :: wassily.Vector3{8, 5, 8}
+
+fire : [dynamic]Particle
+fire_spawn_debt : f64
+
+update_fire :: proc(origin: wassily.Vector3)
+{
+    dt := min(wassily.dt(), 0.1)
+
+    fire_spawn_debt += FIRE_RATE * dt
+    for fire_spawn_debt >= 1 {
+        fire_spawn_debt -= 1
+        angle := rand.float64() * math.TAU
+        r := math.sqrt(rand.float64()) * FIRE_RADIUS
+        append(&fire, Particle{
+            position = origin + {math.cos(angle) * r, 0, math.sin(angle) * r},
+            velocity = {rand.float64_range(-0.2, 0.2), rand.float64_range(1.2, 2.2), rand.float64_range(-0.2, 0.2)},
+            lifetime = rand.float64_range(0.6, 1.2),
+            size     = rand.float64_range(0.15, 0.3),
+        })
+    }
+
+    t := wassily.time()
+    for i := 0; i < len(fire); {
+        p := &fire[i]
+        p.age += dt
+        if p.age >= p.lifetime {
+            unordered_remove(&fire, i)
+            continue
+        }
+        // Pull toward the center axis so the flame tapers, with a little sway.
+        p.velocity.x += ((origin.x - p.position.x) * 2 + math.sin(t * 7 + p.position.y * 3) * 0.6) * dt
+        p.velocity.z += ((origin.z - p.position.z) * 2 + math.cos(t * 5 + p.position.y * 3) * 0.6) * dt
+        p.position += p.velocity * dt
+        i += 1
+    }
+}
+
+draw_fire :: proc(origin: wassily.Vector3)
+{
+    for p in fire {
+        k := p.age / p.lifetime
+        // White-yellow core -> orange -> dim red; additive, so fading to black fades out.
+        color := math.lerp(wassily.Color{255, 230, 120}, wassily.Color{255, 80, 10}, math.min(k * 2, 1))
+        color *= (1 - k) * (1 - k) * 0.6
+        size := p.size * (1 - k * 0.7)
+        wassily.draw_rect_3d(p.position, size, size * 1.4, color)
+    }
+
+    t := wassily.time()
+    flicker := 0.8 + 0.12 * math.sin(t * 13) + 0.08 * math.sin(t * 29 + 1.3)
+    wassily.draw_box_light({
+        center    = origin + {0, 1, 0},
+        size      = FIRE_LIGHT_BOX,
+        color     = {255, 140, 50},
+        intensity = 2.5 * flicker,
+    })
 }
 
 PAUSE_ITEMS := []string{"Resume", "Worlds", "Quit"}

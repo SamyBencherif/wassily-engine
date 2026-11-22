@@ -83,6 +83,14 @@ g_mesh_pipeline_layout: vk.PipelineLayout
 g_mesh_pipeline: vk.Pipeline
 g_line_pipeline_layout: vk.PipelineLayout
 g_line_pipeline: vk.Pipeline
+g_rect_pipeline_layout: vk.PipelineLayout
+g_rect_pipeline: vk.Pipeline
+
+g_frame_set_layout: vk.DescriptorSetLayout
+g_frame_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
+g_frame_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer
+g_frame_memories: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory
+g_frame_mapped: [MAX_FRAMES_IN_FLIGHT]rawptr
 
 g_descriptor_set_layout: vk.DescriptorSetLayout
 g_descriptor_pool: vk.DescriptorPool
@@ -527,11 +535,26 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	offset: vk.DeviceSize = 0
 	view_proj := camera_view_proj(f64(g_swapchain_extent.width) / f64(g_swapchain_extent.height))
 
+	frame_uniforms := Frame_Uniforms {
+		view_proj = linalg.matrix_cast(view_proj, f32),
+	}
+	for light, i in g_box_lights[:min(len(g_box_lights), MAX_BOX_LIGHTS)] {
+		c := light.color / 255 * light.intensity
+		frame_uniforms.lights[i] = {
+			center    = {f32(light.center.x), f32(light.center.y), f32(light.center.z), 0},
+			half_size = {f32(light.size.x / 2), f32(light.size.y / 2), f32(light.size.z / 2), 0},
+			color     = {f32(c.r), f32(c.g), f32(c.b), 0},
+		}
+		frame_uniforms.light_count.x = i32(i + 1)
+	}
+	runtime.mem_copy(g_frame_mapped[frame], &frame_uniforms, size_of(frame_uniforms))
+
 	if len(g_mesh_draws) > 0 {
 		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_mesh_pipeline)
+		vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 1, 1, &g_frame_sets[frame], 0, nil)
 		for &draw in g_mesh_draws {
 			push := Mesh_Push {
-				mvp  = linalg.matrix_cast(view_proj * draw.model, f32),
+				model = linalg.matrix_cast(draw.model, f32),
 				tint = {f32(draw.tint.r / 255), f32(draw.tint.g / 255), f32(draw.tint.b / 255), 1},
 			}
 			vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(push), &push)
@@ -551,6 +574,15 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 		vk.CmdPushConstants(command_buffer, g_line_pipeline_layout, {.VERTEX}, 0, size_of(vp), &vp)
 		vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_line_stream.buffers[frame], &offset)
 		vk.CmdDraw(command_buffer, g_line_stream.counts[frame], 1, 0, 0)
+	}
+
+	// Additive and depth-write free, so particle order doesn't matter.
+	if g_rect_stream.counts[frame] > 0 {
+		vp := linalg.matrix_cast(view_proj, f32)
+		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_rect_pipeline)
+		vk.CmdPushConstants(command_buffer, g_rect_pipeline_layout, {.VERTEX}, 0, size_of(vp), &vp)
+		vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_rect_stream.buffers[frame], &offset)
+		vk.CmdDraw(command_buffer, g_rect_stream.counts[frame], 1, 0, 0)
 	}
 
 	// 2D last, with depth testing off, so it overlays the 3D scene.
@@ -832,17 +864,58 @@ create_texture_resources :: proc() {
 	}
 	must(vk.CreateDescriptorSetLayout(g_device, &layout_info, nil, &g_descriptor_set_layout))
 
-	pool_size := vk.DescriptorPoolSize {
-		type            = .COMBINED_IMAGE_SAMPLER,
-		descriptorCount = MAX_TEXTURES,
+	frame_binding := vk.DescriptorSetLayoutBinding {
+		binding         = 0,
+		descriptorType  = .UNIFORM_BUFFER,
+		descriptorCount = 1,
+		stageFlags      = {.VERTEX, .FRAGMENT},
+	}
+	frame_layout_info := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &frame_binding,
+	}
+	must(vk.CreateDescriptorSetLayout(g_device, &frame_layout_info, nil, &g_frame_set_layout))
+
+	pool_sizes := [2]vk.DescriptorPoolSize {
+		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = MAX_TEXTURES},
+		{type = .UNIFORM_BUFFER, descriptorCount = MAX_FRAMES_IN_FLIGHT},
 	}
 	pool_info := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
-		maxSets       = MAX_TEXTURES,
-		poolSizeCount = 1,
-		pPoolSizes    = &pool_size,
+		maxSets       = MAX_TEXTURES + MAX_FRAMES_IN_FLIGHT,
+		poolSizeCount = len(pool_sizes),
+		pPoolSizes    = &pool_sizes[0],
 	}
 	must(vk.CreateDescriptorPool(g_device, &pool_info, nil, &g_descriptor_pool))
+
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		size := vk.DeviceSize(size_of(Frame_Uniforms))
+		g_frame_buffers[i], g_frame_memories[i] = create_buffer(size, {.UNIFORM_BUFFER}, {.HOST_VISIBLE, .HOST_COHERENT})
+		must(vk.MapMemory(g_device, g_frame_memories[i], 0, size, {}, &g_frame_mapped[i]))
+
+		alloc_info := vk.DescriptorSetAllocateInfo {
+			sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+			descriptorPool     = g_descriptor_pool,
+			descriptorSetCount = 1,
+			pSetLayouts        = &g_frame_set_layout,
+		}
+		must(vk.AllocateDescriptorSets(g_device, &alloc_info, &g_frame_sets[i]))
+
+		buffer_info := vk.DescriptorBufferInfo {
+			buffer = g_frame_buffers[i],
+			range  = size,
+		}
+		write := vk.WriteDescriptorSet {
+			sType           = .WRITE_DESCRIPTOR_SET,
+			dstSet          = g_frame_sets[i],
+			dstBinding      = 0,
+			descriptorCount = 1,
+			descriptorType  = .UNIFORM_BUFFER,
+			pBufferInfo     = &buffer_info,
+		}
+		vk.UpdateDescriptorSets(g_device, 1, &write, 0, nil)
+	}
 
 	sampler_info := vk.SamplerCreateInfo {
 		sType        = .SAMPLER_CREATE_INFO,
@@ -858,8 +931,14 @@ create_texture_resources :: proc() {
 }
 
 destroy_texture_resources :: proc() {
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		vk.UnmapMemory(g_device, g_frame_memories[i])
+		vk.DestroyBuffer(g_device, g_frame_buffers[i], nil)
+		vk.FreeMemory(g_device, g_frame_memories[i], nil)
+	}
 	vk.DestroySampler(g_device, g_sampler, nil)
 	vk.DestroyDescriptorPool(g_device, g_descriptor_pool, nil)
+	vk.DestroyDescriptorSetLayout(g_device, g_frame_set_layout, nil)
 	vk.DestroyDescriptorSetLayout(g_device, g_descriptor_set_layout, nil)
 }
 
@@ -871,6 +950,8 @@ Pipeline_Desc :: struct {
 	cull:         vk.CullModeFlags,
 	front_face:   vk.FrontFace,
 	depth:        bool,
+	// Adds color onto the target and tests depth without writing it.
+	additive:     bool,
 	push_size:    u32,
 	set_layouts:  []vk.DescriptorSetLayout,
 }
@@ -930,12 +1011,21 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 	depth_stencil := vk.PipelineDepthStencilStateCreateInfo {
 		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 		depthTestEnable  = b32(desc.depth),
-		depthWriteEnable = b32(desc.depth),
+		depthWriteEnable = b32(desc.depth && !desc.additive),
 		depthCompareOp   = .LESS,
 	}
 
 	color_blend_attachment := vk.PipelineColorBlendAttachmentState {
 		colorWriteMask = {.R, .G, .B, .A},
+	}
+	if desc.additive {
+		color_blend_attachment.blendEnable = true
+		color_blend_attachment.srcColorBlendFactor = .ONE
+		color_blend_attachment.dstColorBlendFactor = .ONE
+		color_blend_attachment.colorBlendOp = .ADD
+		color_blend_attachment.srcAlphaBlendFactor = .ZERO
+		color_blend_attachment.dstAlphaBlendFactor = .ONE
+		color_blend_attachment.alphaBlendOp = .ADD
 	}
 
 	color_blending := vk.PipelineColorBlendStateCreateInfo {

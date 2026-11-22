@@ -75,6 +75,8 @@ Model :: struct {
 	objects: map[string]Mesh,
 	collider: []Triangle,
 	spawn: Maybe(Spawn),
+	// Positions (model space, Y-up) of empties such as "_fire", keyed by Blender object name.
+	markers: map[string]Vector3,
 }
 
 // From a "_spawn" object; yaw follows its Blender local Z axis (the single-arrow empty direction).
@@ -92,8 +94,27 @@ Mesh_Draw :: struct {
 
 // Mesh pipeline push constants; must match mesh.vert.
 Mesh_Push :: struct {
-	mvp: matrix[4, 4]f32,
+	model: matrix[4, 4]f32,
 	tint: [4]f32,
+}
+
+// Lights every mesh surface inside an axis-aligned box, fading toward the box edges.
+Box_Light :: struct {
+	center: Vector3,
+	size: Vector3,
+	color: Color,
+	intensity: f64,
+}
+
+MAX_BOX_LIGHTS :: 8
+
+// std140 layout; must match the Frame block in mesh.vert and mesh.frag.
+Frame_Uniforms :: struct {
+	view_proj: matrix[4, 4]f32,
+	light_count: [4]i32,
+	lights: [MAX_BOX_LIGHTS]struct {
+		center, half_size, color: [4]f32,
+	},
 }
 
 Camera :: struct {
@@ -114,6 +135,9 @@ g_color_overrides: map[vk.Buffer]Color
 g_position_overrides: map[vk.Buffer]Vector3
 g_line_vertices: [dynamic]LineVertex
 g_line_stream: Vertex_Stream
+g_rect_vertices: [dynamic]LineVertex
+g_rect_stream: Vertex_Stream
+g_box_lights: [dynamic]Box_Light
 g_meshes: [dynamic]Mesh
 g_models: [dynamic]Model
 g_textures: [dynamic]Texture
@@ -355,6 +379,25 @@ transform_matrix :: proc(transform: Transform) -> matrix[4, 4]f64
 	return linalg.matrix4_translate_f64(transform.position) *
 		linalg.matrix4_from_quaternion_f64(rotation) *
 		linalg.matrix4_scale_f64(transform.scale)
+}
+
+// Camera-facing rectangle centered on position, added onto the scene (black is invisible).
+draw_rect_3d :: proc(position: Vector3, width, height: f64, color: Color)
+{
+	forward := linalg.normalize(g_camera.target - g_camera.position)
+	right := linalg.normalize(linalg.cross(forward, g_camera.up)) * (width / 2)
+	up := linalg.normalize(linalg.cross(right, forward)) * (height / 2)
+	c := linalg.array_cast(color / 255, f32)
+	corner :: proc(p: Vector3, c: [3]f32) -> LineVertex { return {linalg.array_cast(p, f32), c} }
+	a, b := corner(position - right - up, c), corner(position + right - up, c)
+	d, e := corner(position + right + up, c), corner(position - right + up, c)
+	append(&g_rect_vertices, a, b, d, a, d, e)
+}
+
+// Adds a box light for this frame only; at most MAX_BOX_LIGHTS are used.
+draw_box_light :: proc(light: Box_Light)
+{
+	append(&g_box_lights, light)
 }
 
 draw_line_3d :: proc(a: Vector3, b: Vector3, color: Color)
@@ -638,7 +681,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 			front_face  = .COUNTER_CLOCKWISE,
 			depth       = true,
 			push_size   = size_of(Mesh_Push),
-			set_layouts = {g_descriptor_set_layout},
+			set_layouts = {g_descriptor_set_layout, g_frame_set_layout},
 		})
 
 		// Line shader outputs the same varyings as the 2D shader, so it reuses its fragment stage.
@@ -654,6 +697,20 @@ run :: proc(initfn : proc(), loopfn : proc())
 			depth      = true,
 			push_size  = size_of(matrix[4, 4]f32),
 		})
+
+		g_rect_pipeline, g_rect_pipeline_layout = create_pipeline({
+			vert       = line_vert,
+			frag       = frag_2d,
+			stride     = size_of(LineVertex),
+			attributes = {
+				{location = 0, format = .R32G32B32_SFLOAT, offset = u32(offset_of(LineVertex, position))},
+				{location = 1, format = .R32G32B32_SFLOAT, offset = u32(offset_of(LineVertex, color))},
+			},
+			topology   = .TRIANGLE_LIST,
+			depth      = true,
+			additive   = true,
+			push_size  = size_of(matrix[4, 4]f32),
+		})
 	}
 	defer vk.DestroyPipelineLayout(g_device, g_pipeline_layout, nil)
 	defer vk.DestroyPipeline(g_device, g_pipeline, nil)
@@ -661,6 +718,8 @@ run :: proc(initfn : proc(), loopfn : proc())
 	defer vk.DestroyPipeline(g_device, g_mesh_pipeline, nil)
 	defer vk.DestroyPipelineLayout(g_device, g_line_pipeline_layout, nil)
 	defer vk.DestroyPipeline(g_device, g_line_pipeline, nil)
+	defer vk.DestroyPipelineLayout(g_device, g_rect_pipeline_layout, nil)
+	defer vk.DestroyPipeline(g_device, g_rect_pipeline, nil)
 
 	// Create command pool.
 	{
@@ -707,6 +766,11 @@ run :: proc(initfn : proc(), loopfn : proc())
 	create_vertex_stream(&g_line_stream, size_of(LineVertex))
 	defer destroy_vertex_stream(&g_line_stream)
 	defer delete(g_line_vertices)
+
+	create_vertex_stream(&g_rect_stream, size_of(LineVertex))
+	defer destroy_vertex_stream(&g_rect_stream)
+	defer delete(g_rect_vertices)
+	defer delete(g_box_lights)
 	defer delete(g_mesh_draws)
 	defer delete(g_color_overrides)
 	defer delete(g_position_overrides)
@@ -753,12 +817,15 @@ run :: proc(initfn : proc(), loopfn : proc())
 
 		clear(&g_vertices)
 		clear(&g_line_vertices)
+		clear(&g_rect_vertices)
+		clear(&g_box_lights)
 		clear(&g_mesh_draws)
 		clear(&g_color_overrides)
 		clear(&g_position_overrides)
 		loopfn()
 		upload_vertex_stream(&g_vertex_stream, current_frame, g_vertices[:])
 		upload_vertex_stream(&g_line_stream, current_frame, g_line_vertices[:])
+		upload_vertex_stream(&g_rect_stream, current_frame, g_rect_vertices[:])
 
 		must(vk.ResetCommandBuffer(g_command_buffers[current_frame], {}))
 		record_command_buffer(g_command_buffers[current_frame], image_index, current_frame)

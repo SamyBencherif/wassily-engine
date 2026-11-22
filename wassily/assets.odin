@@ -40,6 +40,11 @@ load_model :: proc(path: string) -> Model
 			continue
 		}
 		if node.mesh == nil {
+			if node.name != nil {
+				world: [16]f32
+				cgltf.node_transform_world(&node, &world[0])
+				model.markers[strings.clone_from_cstring(node.name)] = {f64(world[12]), f64(world[13]), f64(world[14])}
+			}
 			continue
 		}
 
@@ -286,6 +291,10 @@ destroy_assets :: proc()
 			delete(name)
 		}
 		delete(model.objects)
+		for name in model.markers {
+			delete(name)
+		}
+		delete(model.markers)
 		delete(model.collider)
 	}
 	delete(g_meshes)
