@@ -80,8 +80,8 @@ g_render_pass: vk.RenderPass
 g_pipeline_layout: vk.PipelineLayout
 g_pipeline: vk.Pipeline
 g_mesh_pipeline_layout: vk.PipelineLayout
-// Indexed [blend][double_sided]; all share g_mesh_pipeline_layout.
-g_mesh_pipelines: [2][2]vk.Pipeline
+// Indexed [opaque/blend/filter][double_sided]; all share g_mesh_pipeline_layout.
+g_mesh_pipelines: [3][2]vk.Pipeline
 g_line_pipeline_layout: vk.PipelineLayout
 g_line_pipeline: vk.Pipeline
 g_rect_pipeline_layout: vk.PipelineLayout
@@ -562,7 +562,7 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 		vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 1, 1, &g_frame_sets[frame], 0, nil)
 		for &draw in g_mesh_draws {
 			for primitive in draw.mesh.primitives {
-				if primitive.alpha_mode == .Blend {
+				if primitive.alpha_mode == .Blend || primitive.alpha_mode == .Filter {
 					c := linalg.array_cast(primitive.center, f64)
 					world := (draw.model * [4]f64{c.x, c.y, c.z, 1}).xyz
 					append(&blended, Blended{&draw, primitive, linalg.distance(world, g_camera.position)})
@@ -614,7 +614,8 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 @(private = "file")
 record_mesh_primitive :: proc(command_buffer: vk.CommandBuffer, draw: ^Mesh_Draw, primitive: Primitive, bound_pipeline: ^vk.Pipeline)
 {
-	pipeline := g_mesh_pipelines[1 if primitive.alpha_mode == .Blend else 0][1 if primitive.double_sided else 0]
+	kind := 2 if primitive.alpha_mode == .Filter else 1 if primitive.alpha_mode == .Blend else 0
+	pipeline := g_mesh_pipelines[kind][1 if primitive.double_sided else 0]
 	if pipeline != bound_pipeline^ {
 		vk.CmdBindPipeline(command_buffer, .GRAPHICS, pipeline)
 		bound_pipeline^ = pipeline
@@ -623,7 +624,8 @@ record_mesh_primitive :: proc(command_buffer: vk.CommandBuffer, draw: ^Mesh_Draw
 	push := Mesh_Push {
 		model  = linalg.matrix_cast(draw.model, f32),
 		tint   = {f32(draw.tint.r / 255), f32(draw.tint.g / 255), f32(draw.tint.b / 255), primitive.alpha},
-		params = {primitive.alpha_cutoff, 0, 0, 0},
+		params   = {primitive.alpha_cutoff, 1 if primitive.alpha_mode == .Filter else 0, 0, 0},
+		emissive = {primitive.emissive.r, primitive.emissive.g, primitive.emissive.b, 0},
 	}
 	vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(push), &push)
 	offset: vk.DeviceSize = 0
@@ -991,6 +993,8 @@ Pipeline_Desc :: struct {
 	additive:     bool,
 	// Alpha-blends over the target and tests depth without writing it.
 	blend:        bool,
+	// Multiplies the target by the output color and tests depth without writing it.
+	multiply:     bool,
 	// Reused instead of creating a new layout when set.
 	layout:       vk.PipelineLayout,
 	push_size:    u32,
@@ -1052,7 +1056,7 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 	depth_stencil := vk.PipelineDepthStencilStateCreateInfo {
 		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 		depthTestEnable  = b32(desc.depth),
-		depthWriteEnable = b32(desc.depth && !desc.additive && !desc.blend),
+		depthWriteEnable = b32(desc.depth && !desc.additive && !desc.blend && !desc.multiply),
 		depthCompareOp   = .LESS,
 	}
 
@@ -1074,6 +1078,14 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 		color_blend_attachment.colorBlendOp = .ADD
 		color_blend_attachment.srcAlphaBlendFactor = .ONE
 		color_blend_attachment.dstAlphaBlendFactor = .ONE_MINUS_SRC_ALPHA
+		color_blend_attachment.alphaBlendOp = .ADD
+	} else if desc.multiply {
+		color_blend_attachment.blendEnable = true
+		color_blend_attachment.srcColorBlendFactor = .ZERO
+		color_blend_attachment.dstColorBlendFactor = .SRC_COLOR
+		color_blend_attachment.colorBlendOp = .ADD
+		color_blend_attachment.srcAlphaBlendFactor = .ZERO
+		color_blend_attachment.dstAlphaBlendFactor = .ONE
 		color_blend_attachment.alphaBlendOp = .ADD
 	}
 

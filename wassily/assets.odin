@@ -86,6 +86,13 @@ load_model :: proc(path: string) -> Model
 				case .mask:   material.alpha_mode, material.alpha_cutoff = .Mask, m.alpha_cutoff
 				case .blend:  material.alpha_mode = .Blend
 				}
+				material.emissive = m.emissive_factor
+				if m.has_emissive_strength {
+					material.emissive *= m.emissive_strength.emissive_strength
+				}
+				if material_is_filter(m) {
+					material.alpha_mode = .Filter
+				}
 			}
 			if material.alpha_mode == .Opaque {
 				material.alpha = 1
@@ -492,6 +499,22 @@ read_material :: proc(material: ^cgltf.material, path: string, textures: ^map[^c
 
 	textures[image] = texture
 	return color, texture
+}
+
+// The "wassily_filter" extra written by tools/export_gltf.py for Transparent BSDF materials.
+@(private = "file")
+material_is_filter :: proc(material: ^cgltf.material) -> bool
+{
+	if material.extras.data == nil {
+		return false
+	}
+	Extras :: struct {
+		wassily_filter: bool,
+	}
+	extras: Extras
+	text := string(cstring(rawptr(material.extras.data)))
+	_ = json.unmarshal(transmute([]byte)text, &extras, allocator = context.temp_allocator)
+	return extras.wassily_filter
 }
 
 @(private = "file")

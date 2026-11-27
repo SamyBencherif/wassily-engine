@@ -59,6 +59,8 @@ Alpha_Mode :: enum u8 {
 	Mask,
 	// Drawn after opaque surfaces, sorted back to front, without depth writes.
 	Blend,
+	// Blender's Transparent BSDF: multiplies what's behind by the material color, unlit.
+	Filter,
 }
 
 // A range of a mesh's indices drawn with one material.
@@ -71,6 +73,8 @@ Primitive :: struct {
 	alpha: f32,
 	alpha_cutoff: f32,
 	double_sided: bool,
+	// Added unlit, from Blender's Emission shader or Principled emission.
+	emissive: [3]f32,
 	// Mesh-space centroid, for sorting blended primitives.
 	center: [3]f32,
 }
@@ -116,8 +120,9 @@ Mesh_Draw :: struct {
 Mesh_Push :: struct {
 	model: matrix[4, 4]f32,
 	tint: [4]f32,
-	// x: alpha cutoff.
+	// x: alpha cutoff, y: 1 for Filter.
 	params: [4]f32,
+	emissive: [4]f32,
 }
 
 // Lights every mesh surface inside an axis-aligned box, fading toward the box edges.
@@ -727,10 +732,11 @@ run :: proc(initfn : proc(), loopfn : proc())
 			push_size   = size_of(Mesh_Push),
 			set_layouts = {g_descriptor_set_layout, g_frame_set_layout},
 		}
-		for blend in 0 ..< 2 {
+		for blend in 0 ..< 3 {
 			for double_sided in 0 ..< 2 {
 				desc := mesh_desc
 				desc.blend = blend == 1
+				desc.multiply = blend == 2
 				desc.cull = {} if double_sided == 1 else {.BACK}
 				desc.layout = g_mesh_pipeline_layout
 				g_mesh_pipelines[blend][double_sided], g_mesh_pipeline_layout = create_pipeline(desc)

@@ -4,6 +4,7 @@ layout(push_constant) uniform Push {
     mat4 model;
     vec4 tint;
     vec4 params;
+    vec4 emissive;
 } push;
 
 struct BoxLight {
@@ -27,7 +28,8 @@ layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec4 fragColor;
 layout(location = 2) out vec3 fragWorld;
 layout(location = 3) out vec3 fragLight;
-layout(location = 4) flat out float fragAlphaCutoff;
+layout(location = 4) flat out vec4 fragParams;
+layout(location = 5) flat out vec3 fragEmissive;
 
 void main() {
     vec4 world = push.model * vec4(inPosition, 1.0);
@@ -36,5 +38,6 @@ void main() {
     fragUV = inUV;
     fragColor = vec4(inColor * push.tint.rgb, push.tint.a);
     fragLight = inLight;
-    fragAlphaCutoff = push.params.x;
+    fragParams = push.params;
+    fragEmissive = push.emissive.rgb;
 }
