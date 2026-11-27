@@ -33,14 +33,27 @@ load_model :: proc(path: string) -> Model
 
 	for &node, i in data.nodes {
 		if node.light != nil {
-			if node.light.type == .point {
-				world: [16]f32
-				cgltf.node_transform_world(&node, &world[0])
-				color := linalg.array_cast(node.light.color, f64) * f64(node.light.intensity)
-				append(&lights, Point_Light{{f64(world[12]), f64(world[13]), f64(world[14])}, color})
-			} else {
-				log.warnf("wassily: skipping %v light in %q; only point lights are baked", node.light.type, path)
+			l := node.light
+			if l.type != .point && l.type != .spot {
+				log.warnf("wassily: skipping %v light in %q; only point and spot lights are baked", l.type, path)
+				continue
 			}
+			world: [16]f32
+			cgltf.node_transform_world(&node, &world[0])
+			light := Point_Light {
+				position = {f64(world[12]), f64(world[13]), f64(world[14])},
+				color    = linalg.array_cast(l.color, f64) * f64(l.intensity),
+			}
+			if l.type == .spot {
+				// glTF lights shine down their local -Z.
+				light.direction = linalg.normalize0(-[3]f64{f64(world[8]), f64(world[9]), f64(world[10])})
+				light.cos_outer = math.cos(f64(l.spot_outer_cone_angle))
+				// Blender's exporter writes inner = outer * (1 - spot_blend).
+				blend := 1 - f64(l.spot_inner_cone_angle) / max(f64(l.spot_outer_cone_angle), 1e-6)
+				light.blend = (1 - light.cos_outer) * blend
+				light.spot = true
+			}
+			append(&lights, light)
 			continue
 		}
 		if node.name != nil && string(node.name) == "_spawn" {
@@ -222,11 +235,16 @@ Pending_Mesh :: struct {
 	primitives: []Primitive,
 }
 
-// World space; color is premultiplied by Blender power in watts.
+// World space; color is premultiplied by Blender power in watts. Spot lights add a cone mask.
 @(private = "file")
 Point_Light :: struct {
 	position: Vector3,
 	color: [3]f64,
+	spot: bool,
+	direction: Vector3,
+	cos_outer: f64,
+	// Width of the soft edge in cosine space, as Blender computes it.
+	blend: f64,
 }
 
 // The "wassily_ambient" scene extra written by tools/export_gltf.py (Blender world color).
@@ -245,7 +263,7 @@ scene_ambient :: proc(data: ^cgltf.data) -> [3]f64
 	return extras.wassily_ambient
 }
 
-// Writes per-vertex irradiance from point lights (Lambert, inverse square, hard shadows
+// Writes per-vertex irradiance from point and spot lights (Lambert, inverse square, hard shadows
 // cast by every visible mesh) into Vertex3D.light. Without lights, everything is fully lit.
 @(private = "file")
 bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f64)
@@ -294,11 +312,19 @@ bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f
 				distance := math.sqrt(distance_sq)
 				direction := to_light / distance
 				cosine := linalg.dot(normal, direction)
-				if cosine <= 0 || ray_blocked(origin, light.position, occluders[:]) {
+				if cosine <= 0 {
 					continue
 				}
-				// Matches Blender: a point light of P watts gives radiance P / (4 pi^2 d^2) off white Lambert.
-				total += light.color * cosine / (4 * math.PI * math.PI * distance_sq)
+				mask := 1.0
+				if light.spot {
+					x := (linalg.dot(-direction, light.direction) - light.cos_outer) / max(light.blend, 1e-6)
+					mask = math.smoothstep(0.0, 1.0, x)
+				}
+				if mask <= 0 || ray_blocked(origin, light.position, occluders[:]) {
+					continue
+				}
+				// Matches Blender: a point or spot light of P watts gives radiance P / (4 pi^2 d^2) off white Lambert.
+				total += light.color * mask * cosine / (4 * math.PI * math.PI * distance_sq)
 			}
 			vertex.light = linalg.array_cast(total, f32)
 		}
