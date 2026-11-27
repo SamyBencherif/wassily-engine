@@ -52,11 +52,27 @@ Texture :: struct {
 	descriptor_set: vk.DescriptorSet,
 }
 
+// glTF alphaMode, set in Blender by the material's Alpha input.
+Alpha_Mode :: enum u8 {
+	Opaque,
+	// Pixels with alpha below alpha_cutoff are discarded.
+	Mask,
+	// Drawn after opaque surfaces, sorted back to front, without depth writes.
+	Blend,
+}
+
 // A range of a mesh's indices drawn with one material.
 Primitive :: struct {
 	first_index: u32,
 	index_count: u32,
 	texture: Texture,
+	alpha_mode: Alpha_Mode,
+	// Multiplies the texture's alpha.
+	alpha: f32,
+	alpha_cutoff: f32,
+	double_sided: bool,
+	// Mesh-space centroid, for sorting blended primitives.
+	center: [3]f32,
 }
 
 Mesh :: struct {
@@ -100,6 +116,8 @@ Mesh_Draw :: struct {
 Mesh_Push :: struct {
 	model: matrix[4, 4]f32,
 	tint: [4]f32,
+	// x: alpha cutoff.
+	params: [4]f32,
 }
 
 // Lights every mesh surface inside an axis-aligned box, fading toward the box edges.
@@ -692,7 +710,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 		})
 
 		// Projection flips Y, so the counter-clockwise OBJ winding stays counter-clockwise on screen.
-		g_mesh_pipeline, g_mesh_pipeline_layout = create_pipeline({
+		mesh_desc := Pipeline_Desc {
 			vert        = mesh_vert,
 			frag        = mesh_frag,
 			stride      = size_of(Vertex3D),
@@ -708,7 +726,16 @@ run :: proc(initfn : proc(), loopfn : proc())
 			depth       = true,
 			push_size   = size_of(Mesh_Push),
 			set_layouts = {g_descriptor_set_layout, g_frame_set_layout},
-		})
+		}
+		for blend in 0 ..< 2 {
+			for double_sided in 0 ..< 2 {
+				desc := mesh_desc
+				desc.blend = blend == 1
+				desc.cull = {} if double_sided == 1 else {.BACK}
+				desc.layout = g_mesh_pipeline_layout
+				g_mesh_pipelines[blend][double_sided], g_mesh_pipeline_layout = create_pipeline(desc)
+			}
+		}
 
 		// Line shader outputs the same varyings as the 2D shader, so it reuses its fragment stage.
 		g_line_pipeline, g_line_pipeline_layout = create_pipeline({
@@ -741,7 +768,11 @@ run :: proc(initfn : proc(), loopfn : proc())
 	defer vk.DestroyPipelineLayout(g_device, g_pipeline_layout, nil)
 	defer vk.DestroyPipeline(g_device, g_pipeline, nil)
 	defer vk.DestroyPipelineLayout(g_device, g_mesh_pipeline_layout, nil)
-	defer vk.DestroyPipeline(g_device, g_mesh_pipeline, nil)
+	defer for row in g_mesh_pipelines {
+		for pipeline in row {
+			vk.DestroyPipeline(g_device, pipeline, nil)
+		}
+	}
 	defer vk.DestroyPipelineLayout(g_device, g_line_pipeline_layout, nil)
 	defer vk.DestroyPipeline(g_device, g_line_pipeline, nil)
 	defer vk.DestroyPipelineLayout(g_device, g_rect_pipeline_layout, nil)

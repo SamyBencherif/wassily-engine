@@ -80,7 +80,8 @@ g_render_pass: vk.RenderPass
 g_pipeline_layout: vk.PipelineLayout
 g_pipeline: vk.Pipeline
 g_mesh_pipeline_layout: vk.PipelineLayout
-g_mesh_pipeline: vk.Pipeline
+// Indexed [blend][double_sided]; all share g_mesh_pipeline_layout.
+g_mesh_pipelines: [2][2]vk.Pipeline
 g_line_pipeline_layout: vk.PipelineLayout
 g_line_pipeline: vk.Pipeline
 g_rect_pipeline_layout: vk.PipelineLayout
@@ -549,21 +550,25 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	}
 	runtime.mem_copy(g_frame_mapped[frame], &frame_uniforms, size_of(frame_uniforms))
 
+	Blended :: struct {
+		draw: ^Mesh_Draw,
+		primitive: Primitive,
+		distance: f64,
+	}
+	blended := make([dynamic]Blended, context.temp_allocator)
+	bound_pipeline: vk.Pipeline
+
 	if len(g_mesh_draws) > 0 {
-		vk.CmdBindPipeline(command_buffer, .GRAPHICS, g_mesh_pipeline)
 		vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 1, 1, &g_frame_sets[frame], 0, nil)
 		for &draw in g_mesh_draws {
-			push := Mesh_Push {
-				model = linalg.matrix_cast(draw.model, f32),
-				tint = {f32(draw.tint.r / 255), f32(draw.tint.g / 255), f32(draw.tint.b / 255), 1},
-			}
-			vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(push), &push)
-			vk.CmdBindVertexBuffers(command_buffer, 0, 1, &draw.mesh.vertex_buffer, &offset)
-			vk.CmdBindIndexBuffer(command_buffer, draw.mesh.index_buffer, 0, .UINT32)
 			for primitive in draw.mesh.primitives {
-				texture := draw.texture_override.? or_else primitive.texture
-				vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 0, 1, &texture.descriptor_set, 0, nil)
-				vk.CmdDrawIndexed(command_buffer, primitive.index_count, 1, primitive.first_index, 0, 0)
+				if primitive.alpha_mode == .Blend {
+					c := linalg.array_cast(primitive.center, f64)
+					world := (draw.model * [4]f64{c.x, c.y, c.z, 1}).xyz
+					append(&blended, Blended{&draw, primitive, linalg.distance(world, g_camera.position)})
+					continue
+				}
+				record_mesh_primitive(command_buffer, &draw, primitive, &bound_pipeline)
 			}
 		}
 	}
@@ -574,6 +579,15 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 		vk.CmdPushConstants(command_buffer, g_line_pipeline_layout, {.VERTEX}, 0, size_of(vp), &vp)
 		vk.CmdBindVertexBuffers(command_buffer, 0, 1, &g_line_stream.buffers[frame], &offset)
 		vk.CmdDraw(command_buffer, g_line_stream.counts[frame], 1, 0, 0)
+	}
+
+	if len(blended) > 0 {
+		slice.sort_by(blended[:], proc(a, b: Blended) -> bool { return a.distance > b.distance })
+		bound_pipeline = {}
+		vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 1, 1, &g_frame_sets[frame], 0, nil)
+		for b in blended {
+			record_mesh_primitive(command_buffer, b.draw, b.primitive, &bound_pipeline)
+		}
 	}
 
 	// Additive and depth-write free, so particle order doesn't matter.
@@ -595,6 +609,29 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	vk.CmdEndRenderPass(command_buffer)
 
 	must(vk.EndCommandBuffer(command_buffer))
+}
+
+@(private = "file")
+record_mesh_primitive :: proc(command_buffer: vk.CommandBuffer, draw: ^Mesh_Draw, primitive: Primitive, bound_pipeline: ^vk.Pipeline)
+{
+	pipeline := g_mesh_pipelines[1 if primitive.alpha_mode == .Blend else 0][1 if primitive.double_sided else 0]
+	if pipeline != bound_pipeline^ {
+		vk.CmdBindPipeline(command_buffer, .GRAPHICS, pipeline)
+		bound_pipeline^ = pipeline
+	}
+
+	push := Mesh_Push {
+		model  = linalg.matrix_cast(draw.model, f32),
+		tint   = {f32(draw.tint.r / 255), f32(draw.tint.g / 255), f32(draw.tint.b / 255), primitive.alpha},
+		params = {primitive.alpha_cutoff, 0, 0, 0},
+	}
+	vk.CmdPushConstants(command_buffer, g_mesh_pipeline_layout, {.VERTEX}, 0, size_of(push), &push)
+	offset: vk.DeviceSize = 0
+	vk.CmdBindVertexBuffers(command_buffer, 0, 1, &draw.mesh.vertex_buffer, &offset)
+	vk.CmdBindIndexBuffer(command_buffer, draw.mesh.index_buffer, 0, .UINT32)
+	texture := draw.texture_override.? or_else primitive.texture
+	vk.CmdBindDescriptorSets(command_buffer, .GRAPHICS, g_mesh_pipeline_layout, 0, 1, &texture.descriptor_set, 0, nil)
+	vk.CmdDrawIndexed(command_buffer, primitive.index_count, 1, primitive.first_index, 0, 0)
 }
 
 byte_arr_str :: proc(arr: ^[$N]byte) -> string {
@@ -952,6 +989,10 @@ Pipeline_Desc :: struct {
 	depth:        bool,
 	// Adds color onto the target and tests depth without writing it.
 	additive:     bool,
+	// Alpha-blends over the target and tests depth without writing it.
+	blend:        bool,
+	// Reused instead of creating a new layout when set.
+	layout:       vk.PipelineLayout,
 	push_size:    u32,
 	set_layouts:  []vk.DescriptorSetLayout,
 }
@@ -1011,7 +1052,7 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 	depth_stencil := vk.PipelineDepthStencilStateCreateInfo {
 		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 		depthTestEnable  = b32(desc.depth),
-		depthWriteEnable = b32(desc.depth && !desc.additive),
+		depthWriteEnable = b32(desc.depth && !desc.additive && !desc.blend),
 		depthCompareOp   = .LESS,
 	}
 
@@ -1026,6 +1067,14 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 		color_blend_attachment.srcAlphaBlendFactor = .ZERO
 		color_blend_attachment.dstAlphaBlendFactor = .ONE
 		color_blend_attachment.alphaBlendOp = .ADD
+	} else if desc.blend {
+		color_blend_attachment.blendEnable = true
+		color_blend_attachment.srcColorBlendFactor = .SRC_ALPHA
+		color_blend_attachment.dstColorBlendFactor = .ONE_MINUS_SRC_ALPHA
+		color_blend_attachment.colorBlendOp = .ADD
+		color_blend_attachment.srcAlphaBlendFactor = .ONE
+		color_blend_attachment.dstAlphaBlendFactor = .ONE_MINUS_SRC_ALPHA
+		color_blend_attachment.alphaBlendOp = .ADD
 	}
 
 	color_blending := vk.PipelineColorBlendStateCreateInfo {
@@ -1039,14 +1088,17 @@ create_pipeline :: proc(desc: Pipeline_Desc) -> (pipeline: vk.Pipeline, layout: 
 		size       = desc.push_size,
 	}
 
-	layout_info := vk.PipelineLayoutCreateInfo {
-		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-		setLayoutCount         = u32(len(desc.set_layouts)),
-		pSetLayouts            = raw_data(desc.set_layouts),
-		pushConstantRangeCount = 1 if desc.push_size > 0 else 0,
-		pPushConstantRanges    = &push_range,
+	layout = desc.layout
+	if layout == 0 {
+		layout_info := vk.PipelineLayoutCreateInfo {
+			sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+			setLayoutCount         = u32(len(desc.set_layouts)),
+			pSetLayouts            = raw_data(desc.set_layouts),
+			pushConstantRangeCount = 1 if desc.push_size > 0 else 0,
+			pPushConstantRanges    = &push_range,
+		}
+		must(vk.CreatePipelineLayout(g_device, &layout_info, nil, &layout))
 	}
-	must(vk.CreatePipelineLayout(g_device, &layout_info, nil, &layout))
 
 	pipeline_info := vk.GraphicsPipelineCreateInfo {
 		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,

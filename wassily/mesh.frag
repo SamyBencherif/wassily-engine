@@ -3,9 +3,10 @@
 layout(set = 0, binding = 0) uniform sampler2D tex;
 
 layout(location = 0) in vec2 fragUV;
-layout(location = 1) in vec3 fragColor;
+layout(location = 1) in vec4 fragColor;
 layout(location = 2) in vec3 fragWorld;
 layout(location = 3) in vec3 fragLight;
+layout(location = 4) flat in float fragAlphaCutoff;
 
 layout(location = 0) out vec4 outColor;
 
@@ -22,7 +23,12 @@ layout(set = 1, binding = 0) uniform Frame {
 } frame;
 
 void main() {
-    vec3 base = texture(tex, fragUV).rgb * fragColor;
+    vec4 texel = texture(tex, fragUV);
+    float alpha = texel.a * fragColor.a;
+    if (alpha < fragAlphaCutoff) {
+        discard;
+    }
+    vec3 base = texel.rgb * fragColor.rgb;
 
     // Box lights act as decals: projected onto whatever surface lies inside the box.
     vec3 light = vec3(0.0);
@@ -33,5 +39,5 @@ void main() {
         light += l.color.rgb * falloff.x * falloff.y * falloff.z;
     }
 
-    outColor = vec4(base * (fragLight + light) + light * 0.15, 1.0);
+    outColor = vec4(base * (fragLight + light) + light * 0.15, alpha);
 }

@@ -75,6 +75,21 @@ load_model :: proc(path: string) -> Model
 			first_vertex := u32(len(vertices))
 			first_index := u32(len(indices))
 			color, texture := read_material(primitive.material, path, &textures)
+			material := Primitive{texture = texture, alpha = 1}
+			if m := primitive.material; m != nil {
+				material.double_sided = bool(m.double_sided)
+				if m.has_pbr_metallic_roughness {
+					material.alpha = m.pbr_metallic_roughness.base_color_factor[3]
+				}
+				switch m.alpha_mode {
+				case .opaque: material.alpha_mode = .Opaque
+				case .mask:   material.alpha_mode, material.alpha_cutoff = .Mask, m.alpha_cutoff
+				case .blend:  material.alpha_mode = .Blend
+				}
+			}
+			if material.alpha_mode == .Opaque {
+				material.alpha = 1
+			}
 
 			for attribute in primitive.attributes {
 				if attribute.index != 0 {
@@ -120,7 +135,9 @@ load_model :: proc(path: string) -> Model
 				}
 			}
 
-			append(&primitives, Primitive{first_index, u32(len(indices)) - first_index, texture})
+			material.first_index = first_index
+			material.index_count = u32(len(indices)) - first_index
+			append(&primitives, material)
 		}
 
 		if len(indices) == 0 {
@@ -157,6 +174,14 @@ load_model :: proc(path: string) -> Model
 	bake_lights(pending[:], lights[:], ambient)
 
 	for p in pending {
+		for &primitive in p.primitives {
+			sum: [3]f32
+			for index in p.indices[primitive.first_index:][:primitive.index_count] {
+				sum += p.vertices[index].position
+			}
+			primitive.center = sum / f32(max(primitive.index_count, 1))
+		}
+
 		triangles := make([]Triangle, len(p.indices) / 3)
 		for &triangle, t in triangles {
 			for k in 0 ..< 3 {
@@ -220,13 +245,19 @@ bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f
 {
 	occluders := make([dynamic]Triangle, context.temp_allocator)
 	for m in meshes {
-		for i := 0; i + 2 < len(m.indices); i += 3 {
-			triangle: Triangle
-			for k in 0 ..< 3 {
-				p := linalg.array_cast(m.vertices[m.indices[i + k]].position, f64)
-				triangle[k] = (m.local * [4]f64{p.x, p.y, p.z, 1}).xyz
+		for primitive in m.primitives {
+			// Partially transparent surfaces let light through rather than casting hard shadows.
+			if primitive.alpha_mode != .Opaque {
+				continue
 			}
-			append(&occluders, triangle)
+			for i := primitive.first_index; i + 2 < primitive.first_index + primitive.index_count; i += 3 {
+				triangle: Triangle
+				for k in 0 ..< u32(3) {
+					p := linalg.array_cast(m.vertices[m.indices[i + k]].position, f64)
+					triangle[k] = (m.local * [4]f64{p.x, p.y, p.z, 1}).xyz
+				}
+				append(&occluders, triangle)
+			}
 		}
 	}
 
