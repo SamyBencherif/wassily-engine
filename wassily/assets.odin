@@ -28,8 +28,21 @@ load_model :: proc(path: string) -> Model
 	textures := make(map[^cgltf.image]Texture, allocator = context.temp_allocator)
 	model: Model
 	collider := make([dynamic]Triangle)
+	pending := make([dynamic]Pending_Mesh, context.temp_allocator)
+	lights := make([dynamic]Point_Light, context.temp_allocator)
 
 	for &node, i in data.nodes {
+		if node.light != nil {
+			if node.light.type == .point {
+				world: [16]f32
+				cgltf.node_transform_world(&node, &world[0])
+				color := linalg.array_cast(node.light.color, f64) * f64(node.light.intensity)
+				append(&lights, Point_Light{{f64(world[12]), f64(world[13]), f64(world[14])}, color})
+			} else {
+				log.warnf("wassily: skipping %v light in %q; only point lights are baked", node.light.type, path)
+			}
+			continue
+		}
 		if node.name != nil && string(node.name) == "_spawn" {
 			world: [16]f32
 			cgltf.node_transform_world(&node, &world[0])
@@ -49,6 +62,7 @@ load_model :: proc(path: string) -> Model
 		}
 
 		vertices := make([dynamic]Vertex3D, context.temp_allocator)
+		normals := make([dynamic][3]f32, context.temp_allocator)
 		indices := make([dynamic]u32, context.temp_allocator)
 		primitives := make([dynamic]Primitive)
 
@@ -77,7 +91,8 @@ load_model :: proc(path: string) -> Model
 					}
 				}
 			}
-			// UVs are read after positions so the vertex range exists.
+			resize(&normals, len(vertices))
+			// UVs and normals are read after positions so the vertex range exists.
 			for attribute in primitive.attributes {
 				if attribute.type == .texcoord && attribute.index == 0 {
 					uvs := make([][2]f32, attribute.data.count, context.temp_allocator)
@@ -85,6 +100,9 @@ load_model :: proc(path: string) -> Model
 					for uv, j in uvs {
 						vertices[int(first_vertex) + j].uv = uv
 					}
+				}
+				if attribute.type == .normal && attribute.index == 0 {
+					_ = cgltf.accessor_unpack_floats(attribute.data, cast([^]f32)raw_data(normals[first_vertex:]), attribute.data.count * 3)
 				}
 			}
 
@@ -128,29 +146,151 @@ load_model :: proc(path: string) -> Model
 			continue
 		}
 
-		triangles := make([]Triangle, len(indices) / 3)
+		name := strings.clone_from_cstring(node.name) if node.name != nil else fmt.aprintf("node_%v", i)
+		append(&pending, Pending_Mesh{name, local, vertices[:], normals[:], indices[:], primitives[:]})
+	}
+
+	ambient := [3]f64{1, 1, 1}
+	if len(lights) > 0 {
+		ambient = scene_ambient(data)
+	}
+	bake_lights(pending[:], lights[:], ambient)
+
+	for p in pending {
+		triangles := make([]Triangle, len(p.indices) / 3)
 		for &triangle, t in triangles {
 			for k in 0 ..< 3 {
-				triangle[k] = linalg.array_cast(vertices[indices[t * 3 + k]].position, f64)
+				triangle[k] = linalg.array_cast(p.vertices[p.indices[t * 3 + k]].position, f64)
 			}
 		}
 
 		mesh := Mesh {
-			primitives = primitives[:],
-			local      = local,
+			primitives = p.primitives,
+			local      = p.local,
 			triangles  = triangles,
 		}
-		mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(vertices[:]), {.VERTEX_BUFFER})
-		mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(indices[:]), {.INDEX_BUFFER})
+		mesh.vertex_buffer, mesh.vertex_memory = create_device_local_buffer(slice.to_bytes(p.vertices), {.VERTEX_BUFFER})
+		mesh.index_buffer, mesh.index_memory = create_device_local_buffer(slice.to_bytes(p.indices), {.INDEX_BUFFER})
 		append(&g_meshes, mesh)
-
-		name := strings.clone_from_cstring(node.name) if node.name != nil else fmt.aprintf("node_%v", i)
-		model.objects[name] = mesh
+		model.objects[p.name] = mesh
 	}
 
 	model.collider = collider[:]
 	append(&g_models, model)
 	return model
+}
+
+@(private = "file")
+Pending_Mesh :: struct {
+	name: string,
+	local: matrix[4, 4]f64,
+	vertices: []Vertex3D,
+	normals: [][3]f32,
+	indices: []u32,
+	primitives: []Primitive,
+}
+
+// World space; color is premultiplied by Blender power in watts.
+@(private = "file")
+Point_Light :: struct {
+	position: Vector3,
+	color: [3]f64,
+}
+
+// The "wassily_ambient" scene extra written by tools/export_gltf.py (Blender world color).
+@(private = "file")
+scene_ambient :: proc(data: ^cgltf.data) -> [3]f64
+{
+	if data.scene == nil || data.scene.extras.data == nil {
+		return {}
+	}
+	Extras :: struct {
+		wassily_ambient: [3]f64,
+	}
+	extras: Extras
+	text := string(cstring(rawptr(data.scene.extras.data)))
+	_ = json.unmarshal(transmute([]byte)text, &extras, allocator = context.temp_allocator)
+	return extras.wassily_ambient
+}
+
+// Writes per-vertex irradiance from point lights (Lambert, inverse square, hard shadows
+// cast by every visible mesh) into Vertex3D.light. Without lights, everything is fully lit.
+@(private = "file")
+bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f64)
+{
+	occluders := make([dynamic]Triangle, context.temp_allocator)
+	for m in meshes {
+		for i := 0; i + 2 < len(m.indices); i += 3 {
+			triangle: Triangle
+			for k in 0 ..< 3 {
+				p := linalg.array_cast(m.vertices[m.indices[i + k]].position, f64)
+				triangle[k] = (m.local * [4]f64{p.x, p.y, p.z, 1}).xyz
+			}
+			append(&occluders, triangle)
+		}
+	}
+
+	SHADOW_BIAS :: 0.01
+	for m in meshes {
+		normal_matrix := linalg.inverse_transpose((matrix[3, 3]f64)(m.local))
+		for &vertex, v in m.vertices {
+			if len(lights) == 0 {
+				vertex.light = {1, 1, 1}
+				continue
+			}
+			p := linalg.array_cast(vertex.position, f64)
+			position := (m.local * [4]f64{p.x, p.y, p.z, 1}).xyz
+			normal := linalg.normalize0(normal_matrix * linalg.array_cast(m.normals[v], f64))
+			origin := position + normal * SHADOW_BIAS
+
+			total := ambient
+			for light in lights {
+				to_light := light.position - position
+				distance_sq := linalg.dot(to_light, to_light)
+				distance := math.sqrt(distance_sq)
+				direction := to_light / distance
+				cosine := linalg.dot(normal, direction)
+				if cosine <= 0 || ray_blocked(origin, light.position, occluders[:]) {
+					continue
+				}
+				// Matches Blender: a point light of P watts gives radiance P / (4 pi^2 d^2) off white Lambert.
+				total += light.color * cosine / (4 * math.PI * math.PI * distance_sq)
+			}
+			vertex.light = linalg.array_cast(total, f32)
+		}
+	}
+}
+
+// Whether the segment from a to b crosses any triangle (Moller-Trumbore).
+@(private = "file")
+ray_blocked :: proc(a, b: Vector3, triangles: []Triangle) -> bool
+{
+	direction := b - a
+	for t in triangles {
+		e1 := t[1] - t[0]
+		e2 := t[2] - t[0]
+		h := linalg.cross(direction, e2)
+		det := linalg.dot(e1, h)
+		if abs(det) < 1e-12 {
+			continue
+		}
+		inv := 1 / det
+		s := a - t[0]
+		u := inv * linalg.dot(s, h)
+		if u < 0 || u > 1 {
+			continue
+		}
+		q := linalg.cross(s, e1)
+		w := inv * linalg.dot(direction, q)
+		if w < 0 || u + w > 1 {
+			continue
+		}
+		hit := inv * linalg.dot(e2, q)
+		if hit > 0 && hit < 0.999 {
+			return true
+		}
+	}
+	return false
 }
 
 // Returns the object with the given Blender object name.

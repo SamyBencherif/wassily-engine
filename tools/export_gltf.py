@@ -21,6 +21,17 @@ def material_color(material):
     return [1.0, 1.0, 1.0]
 
 
+def world_color(world):
+    if world is None:
+        return [0.0, 0.0, 0.0]
+    if world.node_tree is not None:
+        for node in world.node_tree.nodes:
+            if node.type == "BACKGROUND" and not node.inputs["Color"].is_linked:
+                strength = node.inputs["Strength"].default_value
+                return [c * strength for c in node.inputs["Color"].default_value[:3]]
+    return list(world.color[:3])
+
+
 def main():
     output = sys.argv[sys.argv.index("--") + 1]
 
@@ -28,12 +39,19 @@ def main():
     for material in bpy.data.materials:
         material["wassily_color"] = material_color(material)
 
+    # Scene extras; ambient term for baked lighting.
+    scene = bpy.context.scene
+    scene["wassily_ambient"] = world_color(scene.world)
+
     bpy.ops.export_scene.gltf(
         filepath=output,
         export_format="GLB",
         export_extras=True,
         export_apply=True,
         export_yup=True,
+        export_lights=True,
+        # Point light intensity stays in Blender watts; the engine converts.
+        export_import_convert_lighting_mode="RAW",
     )
 
 

@@ -5,6 +5,7 @@ layout(set = 0, binding = 0) uniform sampler2D tex;
 layout(location = 0) in vec2 fragUV;
 layout(location = 1) in vec3 fragColor;
 layout(location = 2) in vec3 fragWorld;
+layout(location = 3) in vec3 fragLight;
 
 layout(location = 0) out vec4 outColor;
 
@@ -32,5 +33,5 @@ void main() {
         light += l.color.rgb * falloff.x * falloff.y * falloff.z;
     }
 
-    outColor = vec4(base * (1.0 + light) + light * 0.15, 1.0);
+    outColor = vec4(base * (fragLight + light) + light * 0.15, 1.0);
 }

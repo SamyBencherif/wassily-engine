@@ -20,10 +20,12 @@ layout(set = 1, binding = 0) uniform Frame {
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in vec3 inColor;
+layout(location = 3) in vec3 inLight;
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec3 fragColor;
 layout(location = 2) out vec3 fragWorld;
+layout(location = 3) out vec3 fragLight;
 
 void main() {
     vec4 world = push.model * vec4(inPosition, 1.0);
@@ -31,4 +33,5 @@ void main() {
     fragWorld = world.xyz;
     fragUV = inUV;
     fragColor = inColor * push.tint.rgb;
+    fragLight = inLight;
 }

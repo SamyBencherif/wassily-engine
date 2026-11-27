@@ -23,7 +23,9 @@ Vertex2D :: struct {
 Vertex3D :: struct {
 	position: [3]f32,
 	uv: [2]f32,
-	color: [3]f32
+	color: [3]f32,
+	// Baked point light irradiance; 1 when the model has no lights.
+	light: [3]f32,
 }
 
 LineVertex :: struct {
@@ -698,6 +700,7 @@ run :: proc(initfn : proc(), loopfn : proc())
 				{location = 0, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex3D, position))},
 				{location = 1, format = .R32G32_SFLOAT,    offset = u32(offset_of(Vertex3D, uv))},
 				{location = 2, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex3D, color))},
+				{location = 3, format = .R32G32B32_SFLOAT, offset = u32(offset_of(Vertex3D, light))},
 			},
 			topology    = .TRIANGLE_LIST,
 			cull        = {.BACK},
