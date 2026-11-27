@@ -230,6 +230,12 @@ bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f
 		}
 	}
 
+	if len(lights) > 0 {
+		for &m in meshes {
+			subdivide(&m, BAKE_MAX_EDGE)
+		}
+	}
+
 	SHADOW_BIAS :: 0.01
 	for m in meshes {
 		normal_matrix := linalg.inverse_transpose((matrix[3, 3]f64)(m.local))
@@ -259,6 +265,96 @@ bake_lights :: proc(meshes: []Pending_Mesh, lights: []Point_Light, ambient: [3]f
 			vertex.light = linalg.array_cast(total, f32)
 		}
 	}
+}
+
+// World-space edge length above which triangles are split before baking.
+BAKE_MAX_EDGE :: 1.0
+
+@(private = "file")
+Edge :: [2][3]f32
+
+@(private = "file")
+edge_key :: proc(a, b: [3]f32) -> Edge
+{
+	if a.x < b.x || (a.x == b.x && (a.y < b.y || (a.y == b.y && a.z < b.z))) {
+		return {a, b}
+	}
+	return {b, a}
+}
+
+// Splits marked edges by position, so neighbouring triangles split the same way and no T-junctions appear.
+@(private = "file")
+subdivide :: proc(m: ^Pending_Mesh, max_edge: f64)
+{
+	vertices := make([dynamic]Vertex3D, context.temp_allocator)
+	normals := make([dynamic][3]f32, context.temp_allocator)
+	append(&vertices, ..m.vertices)
+	append(&normals, ..m.normals)
+	indices := m.indices
+	midpoints := make(map[[2]u32]u32, allocator = context.temp_allocator)
+	scale := (matrix[3, 3]f64)(m.local)
+
+	for {
+		marked := make(map[Edge]bool, allocator = context.temp_allocator)
+		for i := 0; i + 2 < len(indices); i += 3 {
+			longest, longest_length := -1, max_edge
+			for k in 0 ..< 3 {
+				d := vertices[indices[i + k]].position - vertices[indices[i + (k + 1) % 3]].position
+				if length := linalg.length(scale * linalg.array_cast(d, f64)); length > longest_length {
+					longest, longest_length = k, length
+				}
+			}
+			if longest >= 0 {
+				marked[edge_key(vertices[indices[i + longest]].position, vertices[indices[i + (longest + 1) % 3]].position)] = true
+			}
+		}
+		if len(marked) == 0 {
+			break
+		}
+
+		out := make([dynamic]u32, context.temp_allocator)
+		for &primitive in m.primitives {
+			first := u32(len(out))
+			for i := primitive.first_index; i + 2 < primitive.first_index + primitive.index_count; i += 3 {
+				split_triangle({indices[i], indices[i + 1], indices[i + 2]}, marked, &vertices, &normals, &midpoints, &out)
+			}
+			primitive.first_index = first
+			primitive.index_count = u32(len(out)) - first
+		}
+		indices = out[:]
+	}
+
+	m.vertices = vertices[:]
+	m.normals = normals[:]
+	m.indices = indices
+}
+
+@(private = "file")
+split_triangle :: proc(t: [3]u32, marked: map[Edge]bool, vertices: ^[dynamic]Vertex3D, normals: ^[dynamic][3]f32, midpoints: ^map[[2]u32]u32, out: ^[dynamic]u32)
+{
+	for k in 0 ..< 3 {
+		a, b, c := t[k], t[(k + 1) % 3], t[(k + 2) % 3]
+		if edge_key(vertices[a].position, vertices[b].position) not_in marked {
+			continue
+		}
+		key := [2]u32{min(a, b), max(a, b)}
+		mid, ok := midpoints[key]
+		if !ok {
+			va, vb := vertices[a], vertices[b]
+			mid = u32(len(vertices))
+			append(vertices, Vertex3D{
+				position = (va.position + vb.position) / 2,
+				uv       = (va.uv + vb.uv) / 2,
+				color    = (va.color + vb.color) / 2,
+			})
+			append(normals, linalg.normalize0(normals[a] + normals[b]))
+			midpoints[key] = mid
+		}
+		split_triangle({a, mid, c}, marked, vertices, normals, midpoints, out)
+		split_triangle({mid, b, c}, marked, vertices, normals, midpoints, out)
+		return
+	}
+	append(out, t[0], t[1], t[2])
 }
 
 // Whether the segment from a to b crosses any triangle (Moller-Trumbore).
